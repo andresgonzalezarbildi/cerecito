@@ -48,11 +48,35 @@ Luego abrir:
 http://localhost:8000
 ```
 
+## Deploy en Netlify
+
+La aplicación puede mantenerse publicada como sitio independiente en `cerecito.netlify.app` y mostrarse también desde el sitio principal en `/cerecito` mediante un proxy/rewrite de Netlify.
+
+El `index.html` incluye una pequeña corrección de base URL para que los recursos relativos (`css/`, `js/` y `assets/`) funcionen tanto en:
+
+```text
+https://andresgonzalez.netlify.app/cerecito
+https://andresgonzalez.netlify.app/cerecito/
+```
+
+Por lo tanto no es necesario duplicar el código dentro del repositorio principal: el sitio principal puede limitarse a definir el rewrite correspondiente en su `netlify.toml`.
+
+El favicon y los íconos de la aplicación están en `assets/icons/`.
+
 ## Estructura
 
 ```text
 facturalista-zeta/
 ├── index.html
+├── assets/
+│   └── icons/
+│       ├── favicon.ico
+│       ├── favicon-16.png
+│       ├── favicon-32.png
+│       ├── favicon-64.png
+│       ├── apple-touch-icon.png
+│       ├── icon-192.png
+│       └── icon-512.png
 ├── css/
 │   └── styles.css
 ├── js/
