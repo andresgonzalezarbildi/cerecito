@@ -200,3 +200,14 @@ El botón de limpiar datos elimina la carga actual, pero conserva las correlacio
 Todo el procesamiento actual ocurre localmente en el navegador. Los ZIP/XML cargados no se envían a un servidor.
 
 El archivo `js/data.js` contiene correlaciones históricas reales. No conviene publicarlo en un repositorio público.
+
+
+## Cambios de la v0.5
+
+- El botón **Agrupar todas por código** actúa sobre todas las facturas cargadas.
+- El Excel de Zeta **siempre agrupa por código** aunque en pantalla se vea el detalle original.
+- La pestaña **Correlaciones** tiene un filtro para mostrar solo relaciones pendientes de elegir.
+- El centro de costo dejó de ser obligatorio para exportar. Los centros `29` o sin descripción se dejan vacíos.
+- Esto permite exportar correctamente casos como **UTE y ANTEL**, que se cargan como artículos aunque históricamente hayan usado centro `29`.
+- La agrupación conserva códigos distintos por separado: por ejemplo `Alimentos EXENTO` y `Alimentos 22%` nunca se mezclan si sus códigos Zeta son diferentes.
+
