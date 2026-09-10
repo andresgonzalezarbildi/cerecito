@@ -18,13 +18,15 @@ La aplicación lee los ZIP/XML descargados desde FacturaLista, utiliza correlaci
 - Cambio manual entre compra contado y compra crédito.
 - Forma de pago editable para comprobantes contado.
 - Eliminación de líneas individuales.
-- Agrupación de toda una factura en una sola línea cuando no interesa conservar el detalle de ítems.
+- Agrupación opcional por código Zeta: todas las líneas asignadas al mismo artículo/concepto se consolidan en una sola línea. Códigos distintos (por ejemplo Alimentos EXENTO y Alimentos 22%) permanecen separados.
 - Exclusión completa de una factura de la carga.
 - Marcado individual o masivo como revisado.
 - Pestaña para editar las correlaciones precargadas.
 - Importación y exportación de correlaciones personalizadas en JSON.
 - Persistencia local de correcciones mediante `localStorage`.
-- Exportación CSV de las facturas listas/revisadas.
+- Exportación a Excel `.xlsx` para importar en Zeta, usando la misma estructura de 28 columnas de `Carga UTE.xlsx`.
+- El Excel incluye únicamente comprobantes cargados con artículos activos; las compras por conceptos quedan fuera hasta habilitar la API de Zeta.
+- Exportación CSV adicional para control y diagnóstico.
 - Informe HTML por factura con resumen de carga, menor confianza y comprobantes marcados para revisión.
 - Limpieza de la carga actual sin borrar las correlaciones aprendidas.
 
@@ -81,6 +83,7 @@ facturalista-zeta/
 │   └── styles.css
 ├── js/
 │   ├── data.js
+│   ├── zeta_template.js
 │   └── app.js
 ├── README.md
 └── .gitignore
@@ -100,6 +103,10 @@ Contiene la base histórica precargada utilizada para sugerir proveedores, centr
 
 Actualmente contiene información real de la empresa, por lo que **el repositorio debería mantenerse privado** mientras este archivo conserve esos datos.
 
+### `js/zeta_template.js`
+
+Contiene codificada la plantilla base `Carga UTE.xlsx` utilizada para generar el archivo de importación sin depender de servicios externos.
+
 ### `js/app.js`
 
 Contiene la lógica de la aplicación:
@@ -118,12 +125,26 @@ Contiene la lógica de la aplicación:
 2. Cargar el ZIP en la aplicación.
 3. Revisar los comprobantes marcados como pendientes.
 4. Corregir centro de costo, tipo de comprobante, forma de pago o artículo/concepto cuando corresponda.
-5. Eliminar líneas o agruparlas cuando no interese conservar el detalle del CFE.
+5. Eliminar líneas o agrupar por código Zeta cuando no interese conservar el detalle original del CFE.
 6. Marcar como `No cargar` los comprobantes que deban excluirse.
 7. Marcar las facturas verificadas como revisadas.
-8. Exportar la propuesta de carga y el informe de revisión.
+8. Exportar **Excel Zeta** para las facturas de artículos, y el informe de revisión para controlar también los casos de conceptos/API.
 
 Las correcciones de correlaciones quedan guardadas en el navegador y pueden exportarse a JSON para respaldo o para moverlas a otro equipo.
+
+## Exportación a Zeta por Excel
+
+Mientras la API no esté habilitada, la aplicación puede generar un archivo `.xlsx` con la estructura de la plantilla de importación de comprobantes utilizada por Zeta (`Carga UTE.xlsx`).
+
+El archivo contiene una fila `C` de cabezal por comprobante y una o más filas `L` de artículos. Se completan, entre otros datos, código de comprobante, serie, número, fecha, moneda, cotización cuando corresponde, proveedor, centro de costo, referencia y código de artículo.
+
+Solo se incluyen facturas que estén completas y cuyo destino sea exclusivamente **Artículo**. Las facturas de gastos cargadas mediante **Conceptos** no se incluyen porque actualmente requieren la API o carga manual.
+
+Cuando se activa **Agrupar por código**, las líneas que tengan el mismo código Zeta se consolidan sumando sus importes. Los códigos diferentes siempre permanecen separados. Las líneas sin código no se agrupan.
+
+Para evitar diferencias por cantidades o descuentos del CFE, cada línea de importación se genera con cantidad `1` y como precio unitario el importe total asignado a ese artículo/código, siguiendo el esquema usado en la plantilla `Carga UTE.xlsx`.
+
+En comprobantes contado la app sigue exigiendo seleccionar una forma de pago para control, pero la plantilla de importación de facturas no posee una columna de forma de pago. Por eso ese dato debe verificarse en Zeta luego de la importación.
 
 ## Criterio de clasificación
 
