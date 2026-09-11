@@ -202,7 +202,7 @@ Todo el procesamiento actual ocurre localmente en el navegador. Los ZIP/XML carg
 El archivo `js/data.js` contiene correlaciones históricas reales. No conviene publicarlo en un repositorio público.
 
 
-## Cambios de la v0.5
+## Cambios de la v0.6
 
 - El botón **Agrupar todas por código** actúa sobre todas las facturas cargadas.
 - El Excel de Zeta **siempre agrupa por código** aunque en pantalla se vea el detalle original.
