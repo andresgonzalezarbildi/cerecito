@@ -12,8 +12,9 @@ import runtime_paths
 
 class SeparationTests(unittest.TestCase):
     def test_source_is_valid_python(self):
-        for file in ROOT.rglob('*.py'):
-            if '.venv' not in file.parts:ast.parse(file.read_text(encoding='utf-8-sig'),filename=str(file))
+        files=list((ROOT/'src').rglob('*.py'))+list((ROOT/'tests').rglob('*.py'))+[ROOT/'launcher.py',ROOT/'migrar_datos.py']
+        for file in files:
+            ast.parse(file.read_text(encoding='utf-8-sig'),filename=str(file))
 
     def test_initialize_writes_only_external_data(self):
         with tempfile.TemporaryDirectory(dir=ROOT.parent,prefix='cerecito-test-') as temporary:
@@ -37,6 +38,10 @@ class SeparationTests(unittest.TestCase):
 
     def test_no_runtime_input_files_in_repository(self):
         forbidden={'.xml','.xlsx','.zip','.sqlite','.db','.jsonl','.log','.pdf','.csv'}
-        self.assertEqual([str(path.relative_to(ROOT)) for path in ROOT.rglob('*') if path.is_file() and path.suffix in forbidden],[])
+        # Una instalación existente puede conservar datos excluidos por Git.
+        # Comprobar las carpetas de código, no recorrer el perfil de Chrome ni
+        # los datos locales conservados junto a la instalación anterior.
+        files=[path for folder in ('src','config','docs','tests') for path in (ROOT/folder).rglob('*') if path.is_file()]
+        self.assertEqual([str(path.relative_to(ROOT)) for path in files if path.suffix in forbidden],[])
 
 if __name__=='__main__':unittest.main()
