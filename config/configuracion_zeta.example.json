@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "url": "https://www.zetasoftware.com/z.gestion.comprobantes.compras",
+  "chrome": {
+    "endpoint": "http://127.0.0.1:9223"
+  },
+  "empresa_rut": "",
+  "control_duplicados": {
+    "numero": "",
+    "proveedor": "",
+    "serie": "",
+    "nombre": ""
+  },
+  "carga_lote": {
+    "habilitada": false
+  },
+  "tolerancia_total": "1.00",
+  "anios_busqueda_duplicados": [
+    2025,
+    2026,
+    2027
+  ],
+  "correlaciones_proveedor_confirmadas": {},
+  "proveedor_destinos_por_producto": ""
+}

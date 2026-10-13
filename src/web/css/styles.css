@@ -3,3 +3,47 @@
 @media(max-width:1150px){.stats{grid-template-columns:repeat(4,1fr)}.fields{grid-template-columns:1fr 1fr 1fr}}@media(max-width:700px){header .top{align-items:flex-start;flex-direction:column}.stats{grid-template-columns:1fr 1fr}.fields{grid-template-columns:1fr}.search{min-width:100%}}
 
 .relFilter.active{background:#17212b;color:#fff;border-color:#17212b}
+
+.relationAddForm{margin-top:16px;padding:14px;background:#f8fafc;border:1px solid var(--line);border-radius:8px}.relationAddForm h3{margin:0 0 6px;font-size:14px}.relationFormGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:12px 0}.relationFormGrid label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:#475569}.relationFormGrid input,.relationFormGrid select{width:100%;box-sizing:border-box;padding:8px;border:1px solid #cbd5e1;border-radius:6px;background:#fff}.relationTableFooter{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;font-size:12px;color:var(--muted)}.relationError{color:#b91c1c!important}.relationAddForm [role=status]{min-height:18px}
+:root #catalogPreview[hidden], :root #catalogProviderExtra[hidden], :root #catalogCurrencyExtra[hidden]{display:none}
+#catalogPreview{border:1px solid var(--line);padding:14px;border-radius:8px;margin:14px 0}
+#catalogPreview .actions{margin-top:12px}
+#catalogAddForm .catalogCheckbox{display:flex;align-items:center;gap:8px}
+#catalogAddForm .catalogCheckbox input{width:auto}
+#catalogCurrencyExtra{display:flex;gap:12px}
+
+/* Editor de correlaciones: secciones, paginación y datos fiscales visibles. */
+[data-relation-section][hidden]{display:none!important}
+.relationSections{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}
+.relationSections .active,#providerRelPendingBtn.active{background:#164e63;color:#fff}
+.invoiceRelations{min-width:1000px}.invoiceRelations td{vertical-align:top}
+.invoiceRelations td:first-child{min-width:180px}.invoiceRelations td:nth-child(2){min-width:220px}
+.invoiceRelations td:nth-child(3){min-width:240px}.invoiceRelations td:last-child{min-width:260px}
+.invoiceRelations label{display:block;margin:8px 0}.invoiceRelations select,.invoiceRelations input{display:block;width:100%;margin-top:4px}
+.invoiceRelationLine{padding:10px 0;border-bottom:1px solid #cbd5e1}
+.xmlTax{margin:6px 0;color:#164e63;font-weight:600}.row-skipped{background:#f1f5f9;color:#64748b}
+.relationTableFooter button:disabled{opacity:.45;cursor:default}
+.taskFilters{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 20px}.lastBotResult{padding:12px;background:#edf2fa;border-radius:8px;margin:12px 0}.invoiceRelations td:last-child{min-width:300px}.invoiceRelations li{margin-bottom:10px}.invoiceRelations h3{font-size:16px}
+.invoiceRelations{display:block;min-width:0;border-collapse:separate;font-size:13px}
+.invoiceRelations thead{display:none}
+.invoiceRelations tbody{display:grid;gap:28px;padding:4px}
+.invoiceRelations tr[data-invoice-key]{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.6fr) minmax(260px,1.2fr);border:2px solid #b8c8da;border-radius:14px;background:white;box-shadow:0 5px 14px #17212b12;overflow:hidden}
+.invoiceRelations tr[data-invoice-key]>td{min-width:0!important;padding:20px;border:0;background:white}
+.invoiceRelations tr[data-invoice-key]>td:first-child{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:12px 24px;background:#eaf0f8;border-bottom:2px solid #b8c8da;font-size:14px}
+.invoiceRelations tr[data-invoice-key]>td:first-child>b{font-size:18px;flex:1 1 240px;color:#122c48}
+.invoiceRelations tr[data-invoice-key]>td:nth-child(2){border-right:1px solid #dce4ee}
+.invoiceRelations tr[data-invoice-key]>td:last-child{background:#f7f9fc;border-left:1px solid #dce4ee}
+.invoiceRelations tr[data-invoice-key]>td:nth-child(2)::before{content:'Datos de la compra';display:block;font-size:15px;font-weight:700;margin-bottom:16px}
+.invoiceRelations tr[data-invoice-key]>td:nth-child(3)::before{content:'Productos y líneas del XML';display:block;font-size:15px;font-weight:700;margin-bottom:16px}
+.invoiceRelations label{font-size:12px;color:#44566c;margin:12px 0;line-height:1.4}
+.invoiceRelations select,.invoiceRelations input{min-height:38px;border-radius:7px;padding:8px;max-width:100%;min-width:0}
+.invoiceRelationLine{padding:16px;margin-bottom:16px;border:1px solid #d6e0ed;border-radius:10px;background:#fbfcff}
+.invoiceRelationLine:last-child{margin-bottom:0}
+.lineTitle{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;min-height:32px}
+.lineTitle b{font-size:14px}.lineTitle button{flex-shrink:0}
+.lineAmounts{margin:10px 0;color:#44566c;font-variant-numeric:tabular-nums}
+.lineFields{display:grid;grid-template-columns:minmax(110px,.8fr) minmax(150px,1.2fr);gap:12px;align-items:start}
+.line-ignored{border-style:dashed;background:#f1f4f7;color:#59677a}.ignoredNotice{line-height:1.5}
+.invoiceRelations .lastBotResult{overflow-wrap:anywhere}.invoiceRelations li{line-height:1.55}
+@media(max-width:1050px){.invoiceRelations tr[data-invoice-key]{grid-template-columns:1fr}.invoiceRelations tr[data-invoice-key]>td:nth-child(2){border-right:0;border-bottom:1px solid #dce4ee}.invoiceRelations tr[data-invoice-key]>td:last-child{border-left:0;border-top:1px solid #dce4ee}}
+@media(max-width:500px){.lineFields{grid-template-columns:1fr}.lineTitle{flex-wrap:wrap}.invoiceRelations tr[data-invoice-key]>td{padding:14px}}
