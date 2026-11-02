@@ -9,14 +9,15 @@ from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 from conciliar import BASE,one_file,already_registered,invoice_issues,read_excel,match_zeta
 from revisar_lote import source_index
-from xml_source import preview_net_lines,ignored_line_indices
+from xml_source import preview_net_lines,ignored_line_indices,non_monetary_line_indices
 from chrome_connection import connect_chrome,choose_page
-from zeta_compras import LIST,refresh_list,prepare_header,select_supplier_exact,set_control,localized,unit_price,input_price,adapt_zeta_rounding,read_totals,confirm_once,SupplierApprovalRequired,validate_supplier_catalog
+from zeta_compras import LIST,refresh_list,prepare_header,select_supplier_exact,set_control,localized,money,unit_price,input_price,adapt_zeta_rounding,read_totals,confirm_once,SupplierApprovalRequired,validate_supplier_catalog,finish_cash_payment
 from zeta_ui_runtime import wait_path,wait_value,select_article,prompt_frame,open_prompt,click_readonly,select_prompt_result
 from informe_pendientes import write_report
 from search_scope import invoice_search_period
@@ -24,14 +25,18 @@ from zeta_bot import exclusive_lock,save_state,append_ledger,unresolved_attempts
 
 REPORT=BASE/'salida/lote/carga.json'
 PROFILES={'Compra Crédito':{'code':'21','destination':'article','editor':'lineacompras'},
-          'Compra Crédito Gastos':{'code':'26','destination':'concept','editor':'lineagastos'}}
+          'Compra Crédito Gastos':{'code':'26','destination':'concept','editor':'lineagastos'},
+          'Compra Contado':{'code':'23','destination':'article','editor':'lineacompras'},
+          'Compra Contado Gastos':{'code':'28','destination':'concept','editor':'lineagastos'}}
 ROUNDING_TOLERANCE=Decimal('1.00')
 
 
-def rounding_differences(actual,expected):
+def rounding_differences(actual,expected,*,rounding_model=None):
     differences={key:Decimal(str(actual[key]))-Decimal(str(value)) for key,value in expected.items()}
+    if rounding_model is not None and all(Decimal(str(actual[k])).is_finite() and abs(Decimal(str(actual[k]))-Decimal(str(rounding_model[k])))<=Decimal('.01') for k in expected):
+        return {key:str(value) for key,value in differences.items() if value}
     if any(not value.is_finite() or abs(value)>ROUNDING_TOLERANCE for value in differences.values()):
-        raise ValueError('La diferencia de Zeta supera la tolerancia de redondeo de 1,00 por comprobante.')
+        raise ValueError('Diferencia no explicada por redondeo; tolerancia '+str(ROUNDING_TOLERANCE)+'. Zeta: '+str(actual)+'; esperado: '+str(expected)+'; diferencias: '+str(differences))
     return {key:str(value) for key,value in differences.items() if value}
 
 
@@ -46,10 +51,9 @@ def allow_rounding(plan):
         tax=(base*rate).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
         for key,value,field in [('neto',base,'baseEsperada'),('iva',tax,'ivaEsperado'),('total',base+tax,'totalEsperado')]:
             actual[key]+=value;expected[key]+=Decimal(line[field])
-        rounding_differences(actual,expected)
         line['toleranciaRedondeo']=str(ROUNDING_TOLERANCE)
     plan['toleranciaRedondeo']=str(ROUNDING_TOLERANCE)
-    plan['diferenciasRedondeoPrevistas']=rounding_differences(actual,plan.get('totalesXML',expected))
+    plan['diferenciasRedondeoPrevistas']=rounding_differences(actual,plan.get('totalesXML',expected),rounding_model=actual)
     return plan
 
 
@@ -62,6 +66,7 @@ def save_operation_state(path,state):
 
 
 def public_result(item):
+    if item['estado']=='AUSENTE_VERIFICADO':return 'NO EXISTE EN ZETA; CONTINUAR REVISIÓN'
     if item['estado']=='CONFIRMADO':return 'CARGADA'
     if item['estado'] in {'YA_CONFIRMADO_LOCAL','RESULTADOS_EN_ZETA_NO_CARGAR'}:return 'YA CARGADA'
     if item['estado']=='APTO_PENDIENTE_GUARDADO':return 'NO CARGADA (PRUEBA SIN GUARDAR)'
@@ -166,7 +171,7 @@ def plan_for(invoice,source):
     # El centro vacío es una elección válida; nunca se reemplaza por un área.
     invoice=deepcopy(invoice)
     invoice.setdefault('zeta',{})['centroCosto']=invoice.get('zeta',{}).get('centroCosto') or ''
-    ignored=ignored_line_indices(source,invoice)
+    ignored=set(ignored_line_indices(source,invoice))|set(non_monetary_line_indices(source))
     unsupported=[line for index,line in enumerate(source.get('lineas',[])) if index not in ignored and str(line.get('indicadorIVA','')) not in {'1','2','3'}]
     if unsupported:
         line=unsupported[0]
@@ -179,7 +184,12 @@ def plan_for(invoice,source):
         exempt=any(l.get('indicadorIVA')=='1' for l in invoice['lineas'])
         raise ValueError(('IVA exento (0%) reconocido en el XML. ' if exempt else '')+
                          'Formulario todavía no validado: '+invoice['zeta']['comprobante']+'. No requiere cambiar el IVA del XML.')
-    if invoice['cfe']['moneda']!='UYU':raise ValueError('Moneda sin flujo validado.')
+    currency=invoice['cfe']['moneda']
+    if currency not in {'UYU','USD'}:raise ValueError('Moneda sin flujo validado.')
+    if currency=='USD':
+        rate=Decimal(source.get('tipoCambio') or '0')
+        if not rate.is_finite() or rate<=0:raise ValueError('El XML en USD no incluye una cotizacion positiva.')
+        invoice['cfe']['tipoCambio']=str(rate)
     if any(l['tipoDestino']!=profile['destination'] for l in invoice['lineas']):
         raise ValueError('Destino contable distinto del formulario específico.')
     plan=preview_net_lines(source,invoice,company_rut(),rounding_tolerance=ROUNDING_TOLERANCE)
@@ -194,8 +204,17 @@ def plan_for(invoice,source):
 
 def absence(page,invoice):
     start,end=invoice_search_period(invoice['cfe']['fecha'],today=date.today())
-    query=refresh_list(page,start,end,str(invoice['cfe']['numero']),require_complete=False)
-    return not bool(query['filas']),[query]
+    query=refresh_list(page,start,end,str(invoice['cfe']['numero']),require_complete=True,stop_when=lambda row:row.get('number')==str(invoice['cfe']['numero']) and row.get('supplier')==invoice['proveedor']['codigoZeta'])
+    same_number=[r for r in query['filas'] if r.get('number')==str(invoice['cfe']['numero']) and r.get('supplier')==invoice['proveedor']['codigoZeta']]
+    if same_number:return False,[query]
+    if invoice['proveedor'].get('generico'):
+        day=date.fromisoformat(invoice['cfe']['fecha']).strftime('%d/%m/%y')
+        generic=refresh_list(page,day,day,'',require_complete=True)
+        total=format(Decimal(str(invoice['cfe']['total'])),',.2f').translate(str.maketrans({',':'.','.':','}))
+        matches=[r for r in generic['filas'] if r.get('supplier')==invoice['proveedor']['codigoZeta'] and r.get('number','') in {'','0',None} and re.search(r'(?<![\d.,])'+re.escape(total)+r'(?![\d.,])',r.get('text',''))]
+        if matches:return False,[query,dict(generic,coincidencias_genericas=matches)]
+    if not query.get('consulta_completa'):raise ValueError('Busqueda incompleta; no se demuestra ausencia.')
+    return True,[query]
 
 
 def select_expense_concept(page,line):
@@ -215,6 +234,9 @@ def select_expense_concept(page,line):
     expected=line['codigoZeta']+' - '+line['descripcionZeta']
     select_prompt_result(row.locator('[id^=span_vSELECT] > a'),
         lambda:page.locator('#CONCEPTOIDLIN').input_value(),lambda text:text==expected,'Concepto seleccionado distinto de Cerecito.')
+    page.locator('#CONCEPTOIDLIN').press('Tab')
+    page.evaluate('async()=>{await gx.O.Valid_Conceptoidlin()}')
+    wait_value(lambda:page.evaluate('gx.isInputEnabled() && !gx.evt.processing && !gx.spa.isNavigating()'),bool,'El concepto sigue validando sus valores por defecto.')
 
 
 def save_invoice(page,invoice,plan,profile,state,state_path):
@@ -226,6 +248,36 @@ def save_invoice(page,invoice,plan,profile,state,state_path):
     if not docid.isdigit() or int(docid)==0:raise ValueError('Cabecera sin ID persistido.')
     state.update(docid=docid,guardado_real=True,estado='CABECERA_CONFIRMADA');save_operation_state(state_path,state)
     finish_lines(page,invoice,plan,profile,state,state_path)
+
+
+def resume_empty_header(page,invoice,source,previous,rows,expected_company):
+    """Complete a journaled header only when identity and an empty grid agree."""
+    if not previous or not previous.get('docid') or previous.get('lineas_confirmadas'):
+        raise ValueError('El registro parcial requiere revision de sus lineas.')
+    if not source or previous.get('sha256XML')!=source.get('sha256XML'):
+        raise ValueError('El XML del registro parcial no coincide.')
+    invoice,plan,profile=plan_for(invoice,source)
+    matches=[r for r in rows if r.get('docid')==previous['docid']]
+    if len(matches)!=1:raise ValueError('No se identifica una unica cabecera parcial.')
+    click_readonly(page.locator('#'+matches[0]['edit']+' > a'))
+    wait_path(page,'/z.gestion.comprobantes.facturacompra')
+    fields={'#vEMPRUT':expected_company['rut'],'#vDOCNUMERO':str(invoice['cfe']['numero']),
+            '#vDOCSERIE':invoice['cfe']['serie'],'#vPRVIDDOC':invoice['proveedor']['codigoZeta'],
+            '#vCMPIDDOC':profile['code'],'#vMNDIDDOC':{'UYU':'1','USD':'2'}[invoice['cfe']['moneda']]}
+    if company_id(page)!=expected_company['id'] or any(page.locator(k).input_value()!=v for k,v in fields.items()):
+        raise ValueError('La identidad de la cabecera parcial no coincide.')
+    if invoice['cfe']['moneda']=='USD' and money(page.locator('#vDOCTC').input_value())!=Decimal(invoice['cfe']['tipoCambio']):
+        raise ValueError('La cotizacion de la cabecera parcial no coincide con el XML.')
+    if json.loads(page.locator('#GridContainerDataV').input_value())!=[] or any(Decimal(v)!=0 for v in read_totals(page).values()):
+        raise ValueError('La cabecera parcial ya tiene lineas o importes; no se repiten.')
+    path=BASE/'estado/facturas'/(hashlib.sha256(invoice['clave'].encode()).hexdigest()+'.json')
+    state=dict(previous,estado='CABECERA_CONFIRMADA',guardado_real=True,plan=plan)
+    click_readonly(page.locator('#BTNENTER'))
+    wait_path(page,'/z.gestion.comprobantes.'+profile['editor'])
+    if page.locator('#DOCID').input_value()!=state['docid']:raise ValueError('El editor no corresponde a la cabecera parcial.')
+    save_operation_state(path,state)
+    finish_lines(page,invoice,plan,profile,state,path)
+    return state
 
 
 def apply_line_tax(page,line,profile):
@@ -240,13 +292,17 @@ def apply_line_tax(page,line,profile):
         value,label={'2':('3','3 - IVA 10% Gastos'),'3':('4','4 - IVA 22% Gastos')}[indicator]
         options=page.locator('#IVAIDLIN option').evaluate_all("options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))")
         if not any(o=={'value':value,'text':label} for o in options):raise ValueError('IVA de gastos diferente del catálogo verificado.')
-        set_control(page,'#IVAIDLIN',value)
+        page.locator('#IVAIDLIN').select_option(value=value)
+        page.locator('#IVAIDLIN').press('Tab')
+        wait_value(lambda:page.evaluate('gx.isInputEnabled() && !gx.evt.processing && !gx.spa.isNavigating()'),bool,'El IVA sigue validando.')
+        if page.locator('#IVAIDLIN').input_value()!=value:raise ValueError('Zeta no conserva el IVA del XML.')
     elif page.locator('#IVAIDLIN').input_value()!= {'2':'1','3':'2'}[indicator]:
         raise ValueError('IVA del artículo '+line['codigoZeta']+' diferente del XML: no se confirma la línea.')
 
 
 def finish_lines(page,invoice,plan,profile,state,state_path):
     docid=state['docid']
+    rounding_model={key:Decimal(0) for key in ('neto','iva','total')}
     for index,line in enumerate(plan['lineas']):
         if index:
             click_readonly(page.locator('#BTNENTER'));wait_path(page,'/z.gestion.comprobantes.'+profile['editor'])
@@ -254,6 +310,12 @@ def finish_lines(page,invoice,plan,profile,state,state_path):
         if profile['destination']=='article':select_article(page,line['codigoZeta'],line['descripcionZeta'])
         else:select_expense_concept(page,line)
         mode=page.locator('#PRVIVAINCDOC').input_value() if profile['destination']=='article' else 'N'
+        amount=input_price(line,mode)*Decimal(line['cantidadXML'])
+        rate={'1':Decimal(0),'2':Decimal('.10'),'3':Decimal('.22')}[line['indicadorIVA']]
+        base=(amount/(1+rate) if mode=='S' else amount).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+        tax=(base*rate).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
+        total=amount.quantize(Decimal('.01'),rounding=ROUND_HALF_UP) if mode=='S' else base+tax
+        for key,value in [('neto',base),('iva',tax),('total',total)]:rounding_model[key]+=value
         for selector,value in [('#LINCONCEPTO',line['descripcionXML'][:50]),('#LINCANTIDAD',localized(line['cantidadXML'])),
                                ('#LINPRECIO1',localized(input_price(line,mode))),('#LINDTO1','0'),('#LINDTO2','0'),('#LINDTO3','0')]:
             if page.locator(selector).count():set_control(page,selector,value)
@@ -266,16 +328,18 @@ def finish_lines(page,invoice,plan,profile,state,state_path):
         totals=read_totals(page);prefix=plan['lineas'][:index+1]
         expected={key:sum((Decimal(l[field]) for l in prefix),Decimal(0)) for key,field in [('neto','baseEsperada'),('iva','ivaEsperado'),('total','totalEsperado')]}
         if index==len(plan['lineas'])-1:expected=plan.get('totalesXML',expected)
-        differences=rounding_differences(totals,expected)
+        differences=rounding_differences(totals,expected,rounding_model=rounding_model)
         state['diferencias_redondeo']=differences
         state['lineas_confirmadas'].append({'indice':index,'totales':totals})
         state.update(estado='LINEA_CONFIRMADA',totales=totals);save_operation_state(state_path,state)
+    finish_cash_payment(page,invoice,state,state_path)
     state.pop('motivo',None)
     state.update(estado='CONFIRMADO',fin=stamp());save_operation_state(state_path,state)
     append_ledger(BASE/'estado/intentos.jsonl',{'clave':state['clave'],'estado':'CONFIRMADO','docid':docid,'fecha':stamp()})
 
 
-def run(save=False,interactive=False,payload=None):
+def run(save=False,interactive=False,payload=None,progress=None,cancelled=None,duplicates_only=False):
+    global ROUNDING_TOLERANCE
     report={'inicio':stamp(),'guardado_real':False,'modo':'GUARDAR' if save else 'SOLO_REVISAR','comprobantes':[]}
     invoices=[]
     try:
@@ -285,27 +349,43 @@ def run(save=False,interactive=False,payload=None):
                 payload=json.loads(input_path.read_text(encoding='utf-8-sig'))
             else:
                 input_path=None;input_hash=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()
-            sources=source_index()
+            sources={} if duplicates_only else source_index()
             invoices=deepcopy(payload['comprobantes'])
             keys=[i['clave'] for i in invoices]
             if not keys:raise ValueError('Lote vacío.')
             repeated={key for key,count in Counter(keys).items() if count>1}
-            history,_=read_excel(one_file(BASE/'entrada/zeta','.xlsx'))
-            input_files=([input_path] if input_path else [])+[one_file(BASE/'entrada/zeta','.xlsx'),BASE/'configuracion_zeta.json']+[p for p in (BASE/'entrada/xml').iterdir() if p.suffix.lower() in {'.xml','.zip'}]
+            history=[]
+            history_files=[]
+            if not duplicates_only:
+                history_files=sorted(p for p in (BASE/'entrada/zeta').glob('*.xlsx') if not p.name.startswith('~$'))
+                if not history_files:raise ValueError('Importa un historico de Zeta (.xlsx).')
+                for history_file in history_files:
+                    rows,_=read_excel(history_file)
+                    history.extend(rows)
+            if duplicates_only and save:raise ValueError('La búsqueda previa no permite guardar.')
+            input_files=([input_path] if input_path else [])+history_files+[BASE/'configuracion_zeta.json']+[p for p in (BASE/'entrada/xml').iterdir() if p.suffix.lower() in {'.xml','.zip'}]
             fingerprints={str(p):checksum(p) for p in input_files}
             # Confirmados locales no deciden duplicados: consultar Zeta siempre.
             uncertain=unresolved_attempts(BASE/'estado/intentos.jsonl')
+            if duplicates_only:uncertain.update(unresolved_attempts(BASE/'entrada/migracion_anterior/estado/intentos.jsonl'))
             config=json.loads((BASE/'configuracion_zeta.json').read_text(encoding='utf-8'))
+            ROUNDING_TOLERANCE=Decimal(str(config.get('tolerancia_total','1.00')))
+            if not ROUNDING_TOLERANCE.is_finite() or not 0<=ROUNDING_TOLERANCE<=100:raise ValueError('Tolerancia inválida.')
             if save and not config.get('carga_lote',{}).get('habilitada'):raise ValueError('Carga del lote deshabilitada en configuración.')
             report.update(total=len(invoices),sha256Cerecito=input_hash)
             with sync_playwright() as pw:
                 browser=connect_chrome(pw,config);page=choose_page(browser,config)
-                page.goto(LIST,wait_until='load');wait_path(page,'/z.gestion.comprobantes.compras')
+                from zeta_session import prepare_session
+                prepare_session(page,config)
+                wait_path(page,'/z.gestion.comprobantes.compras')
                 control=refresh_list(page,'01/01/26',date.today().strftime('%d/%m/%y'),control_value('numero'))
                 if not any(r['number']==control_value('numero') and control_value('nombre') in r['text'] for r in control['filas']):raise ValueError('El buscador no pasa el control positivo; no se demuestra ausencia.')
                 report['control_positivo']=control
                 report['empresa_verificada']=verify_company(page,control)
                 for number,invoice in enumerate(invoices,1):
+                    if cancelled and cancelled():
+                        report['cancelado']=True
+                        break
                     key=invoice['clave'];item={'clave':key,'proveedor':invoice['proveedor']['nombre'],'numero':invoice['cfe']['numero'],
                         'totalXML':invoice['cfe']['total'],'moneda':invoice['cfe']['moneda'],'formulario':invoice['zeta'].get('comprobante',''),
                         'centroCosto':invoice['zeta'].get('centroCosto') or '','estado':'REVISANDO','guardado_real':False}
@@ -322,16 +402,35 @@ def run(save=False,interactive=False,payload=None):
                             item.update(estado='EXCLUIDO',motivo='Comprobante excluido en Cerecito.');continue
                         if str(invoice['cfe']['tipo']) in {'181','182','183'}:
                             item.update(estado='DOCUMENTO_NO_COMPRA',motivo='El XML es un remito o resguardo; no corresponde cargarlo como factura de compra.');continue
+                        if not invoice['proveedor'].get('codigoZeta'):
+                            item.update(estado='BLOQUEADO_IDENTIDAD',motivo='Elegí el proveedor para poder buscar esta factura en Zeta.');continue
+                        if duplicates_only and str(invoice['cfe']['tipo'])!='111':
+                            item.update(estado='BLOQUEADO_TIPO',motivo='Este tipo fiscal requiere una búsqueda específica. Se conserva visible para verificarlo.');continue
                         absent,proof=absence(page,invoice);item['consultas_zeta']=proof
                         pending_state=incomplete_operation(key)
+                        if duplicates_only and not pending_state:
+                            archived=BASE/'entrada/migracion_anterior/estado/facturas'/(hashlib.sha256(key.encode()).hexdigest()+'.json')
+                            if archived.exists():
+                                old=json.loads(archived.read_text(encoding='utf-8-sig'))
+                                if old.get('guardado_iniciado') and old.get('estado')!='CONFIRMADO':pending_state=old
                         if not absent:
                             exact=[r for p in proof for r in p['filas'] if r['number']==str(invoice['cfe']['numero']) and r['series']==invoice['cfe']['serie'] and r['supplier']==invoice['proveedor'].get('codigoZeta')]
                             if exact and (pending_state or key in uncertain):
+                                if save and pending_state and pending_state.get('docid') and not pending_state.get('lineas_confirmadas'):
+                                    item.update(guardado_parcial=True,docid=pending_state['docid'])
+                                    resumed=resume_empty_header(page,invoice,sources.get(key),pending_state,exact,report['empresa_verificada'])
+                                    item.update(estado='CONFIRMADO',guardado_real=True,docid=resumed['docid'],totales=resumed['totales'],recuperado=True)
+                                    report['guardado_real']=True
+                                    page.goto(LIST,wait_until='load')
+                                    continue
                                 item.update(estado='BLOQUEADO_INCIERTO',guardado_parcial=True,
                                     docid=(pending_state or {}).get('docid') or exact[0].get('docid',''),
                                     motivo='Existe un registro de una carga interrumpida; puede estar incompleto. No se anuncia como cargado ni se repite el guardado.');continue
                             item['estado']='RESULTADOS_EN_ZETA_NO_CARGAR' if exact else 'BLOQUEADO_COINCIDENCIAS'
                             if not exact:item['motivo']='La búsqueda devuelve registros que no identifican unívocamente este emisor, serie y número; revisar antes de cargar.'
+                            continue
+                        if duplicates_only:
+                            item.update(estado='AUSENTE_VERIFICADO',motivo='No existe en la búsqueda completa de la empresa verificada. Continuá con la revisión.')
                             continue
                         if key in uncertain or pending_state:
                             item['recuperacion_intento']=reconcile_absent_attempt(
@@ -383,7 +482,7 @@ def run(save=False,interactive=False,payload=None):
                             item['estado']='BLOQUEADO_PREPARACION'
                             if isinstance(error,SupplierApprovalRequired):
                                 item.update(estado='BLOQUEADO_CONFIRMACION_PROVEEDOR',proveedor_xml=error.supplier,proveedor_zeta=error.actual,
-                                    motivo='Proveedor con RUT vacío en Zeta. Ejecutar INICIAR_BOT.bat y confirmar la identidad en la ventana del bot; Enter deja la factura pendiente.')
+                                    motivo='Proveedor con RUT vacío en Zeta. Confirmá la relación en Cerecito y reintentá la verificación.')
                             raise
                     except Exception as error:
                         if item['estado'] not in {'CONFIRMADO','INCIERTO','BLOQUEADO_PREPARACION','BLOQUEADO_CONFIRMACION_PROVEEDOR'}:
@@ -396,6 +495,7 @@ def run(save=False,interactive=False,payload=None):
                         item['resultado']=public_result(item)
                         print(item['resultado']+': '+item['proveedor']+' '+key,flush=True)
                         save_state(REPORT,report)
+                        if progress:progress(deepcopy(item))
             report['resumen']=dict(Counter(i['estado'] for i in report['comprobantes']))
             blocked=sum(v for k,v in report['resumen'].items() if k.startswith('BLOQUEADO') or k=='INCIERTO')
             pending=report['resumen'].get('APTO_PENDIENTE_GUARDADO',0)

@@ -12,20 +12,20 @@ def actions(item,invoice):
     reason=item.get('motivo','')
     if any(text in reason for text in ('indicador 6 sin plan','indicador 7 sin plan','fiscal XML 6 sin plan','fiscal XML 7 sin plan')):
         return ['En Comprobantes, pulsá Ignorar línea junto al redondeo o la línea no facturable que querés omitir. El bot comprobará que la base, el IVA y el total del XML sigan coincidiendo.']
-    if status=='APTO_PENDIENTE_GUARDADO':return ['Datos y plan verificados. Ejecutá INICIAR_BOT.bat para cargarla; esta revisión no guardó nada.']
+    if status=='APTO_PENDIENTE_GUARDADO':return ['Datos y plan verificados. En el resumen de Cerecito, pulsá Cargar comprobantes; esta revisión no guardó nada.']
     if status in {'CONFIRMADO','YA_CONFIRMADO_LOCAL','RESULTADOS_EN_ZETA_NO_CARGAR'}:return []
     if status=='DOCUMENTO_NO_COMPRA':return []
     if status in {'INCIERTO','BLOQUEADO_INCIERTO'}:
         return ['Verificar en Zeta el ID y las líneas guardadas antes de repetir. No borrar el registro local para forzar una carga.']
     if status=='BLOQUEADO_CONFIRMACION_PROVEEDOR':
         code=item.get('proveedor_zeta',{}).get('codigoZeta','')
-        return ['Ejecutá INICIAR_BOT.bat. Cuando muestre este proveedor, si es el mismo del XML, escribí '+('CONFIRMAR '+code if code else 'la confirmación indicada en la ventana')+'. La relación se guarda para próximas ejecuciones.']
+        return ['En la revisión de Cerecito, compará el nombre/código de Zeta con el nombre/RUT XML y pulsá Confirmar relación si corresponden al mismo proveedor.']
     if status in {'BLOQUEADO_COINCIDENCIAS','BLOQUEADO_HISTORICO'}:
         return ['Comparar emisor/RUT, serie, número e importe con los registros mostrados abajo. Corregir la correlación en Cerecito o aportar un histórico actualizado; no forzar el alta.']
     if any(word in reason for word in ('Falta validar','sin plan validado','redondeo','sin captura','sin validar')):
         return ['Requiere corregir o validar el bot. Tus datos no resuelven este bloqueo; conservá el IVA y los importes del XML.']
     if 'Destino contable distinto' in reason:
-        return ['En Comprobantes, elegí Compra Crédito para artículos o Compra Crédito Gastos para conceptos. El formulario y el tipo de destino de las líneas deben coincidir.']
+        return ['Revisá la modalidad Crédito/Contado y los destinos de las líneas en Cerecito. El formulario se deriva de ambas decisiones.']
     result=[]
     if 'Contado: falta forma de pago' in reason:
         result.append('En Comprobantes → Forma de pago, elegí cómo se pagó esta factura.')
@@ -33,8 +33,6 @@ def actions(item,invoice):
         result.append('En Comprobantes → Centro, elegí el área de esta compra o dejalo vacío. Si el centro mostrado ya es correcto y los datos están completos, pulsá Confirmar revisión.')
     if 'baja confianza' in reason:
         result.append('Revisá proveedor, formulario y códigos de las líneas. Si son correctos, marcá la factura como revisada.')
-    if 'Finesa:' in reason:
-        result.append('Elegí Alimentos y bebidas o Housekeeping para cada producto de Finesa.')
     if not invoice.get('proveedor',{}).get('codigoZeta'):
         result.append('Cerecito → Correlaciones: asociar el RUT del XML con el código real del proveedor en Zeta.')
     voucher=invoice.get('zeta',{}).get('comprobante','')

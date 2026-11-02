@@ -1,77 +1,112 @@
-﻿# Cerecito
+# Cerecito
 
-Base de código separada de los datos locales para preparar la nueva implementación.
+Asistente local para importar CFE de Uruguay, revisar destinos y ejecutar el motor de compras de Zeta desde una web local. Esta entrega implementa el flujo persistente y su API; **todavía no satisface todos los criterios de aceptación**. Las limitaciones reales están detalladas en [docs/VALIDACION.md](docs/VALIDACION.md).
 
-Este repositorio contiene el programa y sus archivos de desarrollo. Los datos locales, la instalación anterior y las copias de trabajo quedan excluidos mediante `.gitignore`.
+## Clonación e instalación
 
-## Qué contiene
+Necesitás Git para clonar, Python 3.11 o posterior y Google Chrome. En una terminal de instalación:
 
-| Ruta | Contenido |
-|---|---|
-| `src/web/` | HTML, CSS y JavaScript de Cerecito, con base histórica vacía por defecto. |
-| `src/backend/` | Motor Python y adaptador de Zeta. Solo módulos necesarios; sin reparaciones de facturas particulares. |
-| `config/` | Configuración de ejemplo, sin empresa ni relaciones aprobadas. |
-| `tests/` | Comprobaciones de separación y estructura. |
-| `docs/` | Prompt de implementación y explicación de la separación. |
-| `launcher.py`, `ABRIR_CERECITO.bat` | Apertura de la interfaz local. |
-| `INSTALAR.bat`, `requirements.txt` | Preparación de dependencias en `.venv`. |
-| `migrar_datos.py` | Copia los datos locales desde la instalación anterior, sin borrarla. |
-
-## Datos fuera del repositorio
-
-Por defecto se guardan en `../cerecito-datos-locales/`, una carpeta hermana del repositorio. Otra ubicación se define con la variable de entorno `CERECITO_DATA_DIR`.
-
-```text
-carpeta-de-trabajo/
-  cerecito/               ← repositorio de código
-  cerecito-datos-locales/  ← conservar localmente; no subir
-    importar/             ← archivos nuevos para el receptor
-    entrada/              ← XML/ZIP, Excel, catálogos y correlaciones
-    estado/               ← journal e intentos, necesarios para no duplicar
-    salida/               ← informes y diagnósticos
-    web/                  ← resultado actual del bot
-    perfil_chrome_bot/    ← sesión local de Chrome
-    configuracion_zeta.json
-    base_historica.js
+```powershell
+git clone URL_DEL_REPOSITORIO cerecito
+cd cerecito
 ```
 
-No todos los datos locales son descartables: catálogos, correlaciones, decisiones y registros de cargas se deben conservar. Logs e informes anteriores pueden archivarse aparte. Un `git pull` actualiza el código y no toca esta carpeta.
+Después hacé doble clic en `INSTALAR.bat`. Crea `.venv`, instala las dependencias declaradas y aplica las migraciones de SQLite. Detecta Python instalado aunque no exista `py`: busca ejecutables, instalaciones registradas de Python y carpetas habituales de Conda. Omite los alias de Microsoft Store y comprueba Python 3.11 o posterior. También admite `CERECITO_PYTHON` con la ruta del ejecutable. No hay rutas personales de Miniconda en los lanzadores.
 
-## Primera instalación
+Para el uso diario hacé doble clic en **ABRIR_CERECITO.bat**. Abre `http://127.0.0.1:8765/` mediante `pythonw`, sin consola interactiva. Podés crear un acceso directo a ese archivo desde el Explorador. Cerrá la aplicación y Chrome del bot antes de actualizar; no ejecutes dos instalaciones contra la misma empresa.
 
-1. Tener Python 3.11 o posterior y Google Chrome instalados.
-2. Ejecutar `INSTALAR.bat`. Crea `.venv`, instala las dependencias y genera las carpetas de datos.
-3. Ejecutar `ABRIR_CERECITO.bat`. Abre la interfaz en `http://127.0.0.1:8765/`.
-4. Importar los catálogos y correlaciones desde la interfaz. Cargar los ZIP/XML.
-5. Para operar contra Zeta, configurar la empresa y el documento de control en la configuración externa e iniciar sesión en Chrome del bot.
+## Primera apertura
 
-Si Python no está en el lanzador `py`, definir `CERECITO_PYTHON` con su ejecutable antes de instalar. La copia limpia no fija una ruta personal de Miniconda.
+1. En el asistente, elegí la carpeta externa de datos antes de guardar la empresa. El valor predeterminado es `../cerecito-datos-locales/`. Una variable `CERECITO_DATA_DIR` explícita prevalece sobre la elección del asistente.
+2. Completá nombre de empresa, RUT receptor y tolerancia por comprobante, inicialmente 1,00 UYU.
+3. Importá los maestros desde Configuración. Primero se muestra una vista previa; confirmá para aplicarlos. Los códigos vienen exclusivamente de tus maestros.
+4. Importá el histórico Excel de Zeta desde Configuración. El motor existente necesita ese reporte y un comprobante de control positivo para comprobar las búsquedas en la empresa correcta. Si faltan, el trabajo informa el error y no guarda.
+5. Completá número, serie, código y nombre de proveedor de una factura que ya exista en esa empresa, en «Control de conexión y duplicados».
+6. Usá «Abrir conexión con Zeta», iniciá sesión y elegí la empresa en Chrome. Cerecito utiliza un perfil exclusivo y persistente, externo al repositorio.
 
-## Migración de los datos existentes
+No se guardan credenciales en el código. La configuración de ejemplo está vacía y la carga permanece deshabilitada hasta que se inicia explícitamente un trabajo de carga desde la interfaz.
 
-Con las dependencias instaladas:
+## Uso normal
+
+**Inicio → Análisis del ZIP → Revisión → Resumen → Carga → Resultados.**
+
+Importá un ZIP de FacturaLista o un XML. El lote queda guardado; al volver a abrir Cerecito se recuperan automáticamente el último lote y sus decisiones. Una identidad repetida conserva las elecciones, mientras que un XML fiscal distinto con la misma identidad se rechaza.
+
+«Revisar pendientes» presenta una factura por vez. Elegí Crédito/Contado independientemente de Artículo/Gasto, buscá códigos por nombre o descripción, seleccioná proveedor y, opcionalmente, centro. El XML sugiere la modalidad; una elección manual prevalece. Cada cambio se guarda inmediatamente. Confirmá y avanzá, o salteá la factura. Las salteadas tienen su propia bandeja y pueden volver a incluirse. Las facturas listas también permiten «Revisar elección».
+
+Antes de revisar, Cerecito busca las facturas en Zeta. Las coincidencias exactas quedan en «Ya existentes en Zeta» y salen de la revisión. La búsqueda no requiere clasificar las líneas ni importar un histórico Excel. Si no puede comprobar una factura, la mantiene visible con el motivo; una consulta incompleta nunca demuestra ausencia. «Buscar ya cargadas» repite la comprobación.
+
+La búsqueda abre Chrome del bot si está cerrado. Si venció la sesión, usa el autocompletado del perfil para enviar una vez el formulario de acceso, selecciona la empresa por su RUT y abre Compras. No copia ni almacena contraseñas. Si Chrome no completa el acceso o Zeta exige una verificación adicional, deja el navegador abierto con un mensaje concreto. La recuperación de sesión sucede antes del lote; nunca repite un guardado interrumpido.
+
+En cada factura, elegí un sector y usá «Aplicar sector a toda la factura». La distribución vincula exento, IVA 10% e IVA 22% con destinos reales del catálogo. Para A&B se proponen los artículos de Alimentos cuando la coincidencia es única. La distribución queda disponible para futuras facturas del sector; los impuestos sin destino quedan pendientes. Podés ajustar excepciones por línea. La modalidad y los importes originales se conservan.
+
+Para combustible y otros gastos compartidos, elegí «Sin sector / para distribuir». Al aplicar sin destinos por IVA, se vacía el centro y se conservan las elecciones de las líneas. También podés seleccionar conceptos en «Destinos por IVA» y aplicarlos a toda la factura con el centro vacío. Esto no distribuye importes automáticamente entre sectores.
+
+Las coincidencias por nombre son propuestas. Cada destino elegido manualmente en una línea se guarda automáticamente como regla para la empresa, RUT proveedor, descripción e IVA. La regla tiene prioridad sobre el histórico; una corrección manual actualiza el destino futuro. No modifica elecciones explícitas de otras facturas ni aprende asignaciones masivas de sector. Un proveedor se reconoce automáticamente solo por coincidencia fiscal única. Para proveedores sin RUT, la revisión muestra ambos nombres y permite «Confirmar relación»; el motor vuelve a comprobar el nombre/código real antes de guardar. Un RUT contradictorio bloquea.
+
+Solo se pueden ignorar líneas no facturables con indicadores 6/7. El XML y sus orígenes se conservan; los productos gravados y exentos no pueden ocultarse. Los redondeos admitidos se muestran con sus diferencias y respetan la tolerancia por comprobante.
+
+En el resumen se pueden cargar las facturas listas aunque queden otras pendientes. Las notas de crédito, otros tipos sin adaptador y las facturas con ajustes globales quedan en «Carga manual en Zeta» y no bloquean las facturas comunes. Esos comprobantes no se cargan automáticamente ni se convierten en compras comunes. «Verificar en Zeta» ejecuta el motor sin guardar; «Cargar listas» solicita el guardado de las facturas listas. Los trabajos corren en segundo plano, conservan resultados fechados y evitan concurrencia por empresa. «Cancelar después de esta factura» espera a terminar la operación actual. Recargar el navegador no reinicia el trabajo. Consultá los resultados y expandí los detalles para soporte.
+
+**Contado:** se deriva correctamente Compra Contado o Compra Contado Gastos y se exige elegir un pago del maestro, pero el guardado de estos formularios está bloqueado hasta inspeccionar sus campos nativos reales. No se transforma en crédito. Los destinos mixtos tampoco se separan en dos facturas.
+
+## Formato de maestros
+
+CSV (separador detectado), XLSX (primera hoja, encabezados en la primera fila) o JSON con una lista de registros / `{ "catalog": [...] }`.
+
+| Columna | Uso |
+|---|---|
+| `kind` | `supplier`, `article`, `concept`, `vat`, `center`, `payment` o `form` |
+| `code` | Código real de Zeta; usar texto para preservar ceros iniciales |
+| `name` | Nombre/descripción real |
+| `rut` | RUT fiscal del proveedor; vacío exige confirmación explícita |
+| `vat` | Indicador XML admitido para el destino: 1 exento, 2 mínimo, 3 básico |
+| `synonyms` | Lista en JSON, o textos separados por `|` en CSV/Excel |
+
+Ejemplo **sintético**, para probar sin empresa real:
+
+```json
+[
+  {"kind":"supplier","code":"P-DEMO","name":"Proveedor sintético","rut":"000000000002"},
+  {"kind":"article","code":"A-DEMO","name":"Producto sintético","vat":"1"},
+  {"kind":"payment","code":"PAGO-DEMO","name":"Pago sintético"}
+]
+```
+
+Actualizar un catálogo reemplaza únicamente registros de la misma empresa, tipo y código; no borra elecciones. Los registros tienen fecha de versión y procedencia. Importar un maestro de formularios **no habilita automáticamente** un adaptador de guardado sin verificarlo en Zeta.
+
+## Datos, copias y actualizaciones
+
+`runtime_paths.py` es la entrada de configuración de rutas. La elección inicial se recuerda en `%LOCALAPPDATA%/Cerecito/runtime.json`; `CERECITO_DATA_DIR` tiene prioridad. XML/ZIP, catálogos, configuración, SQLite, histórico, journals, resultados y perfil Chrome quedan fuera de Git. SQLite está en `estado/cerecito.sqlite`.
+
+Con Cerecito y Chrome del bot cerrados, respaldá **toda** la carpeta de datos. Para mover una instalación ya configurada, copiá esa carpeta completa al nuevo destino y definí `CERECITO_DATA_DIR` en las variables de usuario de Windows antes de abrir. El asistente permite elegir la carpeta durante la instalación inicial; no mueve datos activos.
+
+Para actualizar, cerrá Cerecito, hacé un respaldo y ejecutá:
+
+```powershell
+git pull
+```
+
+Después ejecutá `INSTALAR.bat` y volvé a abrir. Las migraciones SQL numeradas en `src/backend/migrations/` se aplican transaccionalmente solo una vez. Una actualización del código conserva los datos externos. No borres `estado/` ni reemplaces la carpeta de datos por una carpeta vacía: los journals son necesarios para impedir duplicados.
+
+## Migrar la instalación anterior
+
+Exportá correlaciones/decisiones desde el Cerecito anterior mientras todavía podés abrirlo con su origen `file://`. Importá primero sus XML en la nueva web; después, desde Configuración → «Migrar decisiones anteriores», seleccioná la exportación de correlaciones o el JSON para agente, revisá la vista previa y confirmá.
+
+Se migran destinos por origen, modalidad, centro, pagos, salteados y revisión. Se conserva una copia íntegra del archivo importado en `entrada/correlaciones/`. Los XML ausentes o las líneas agrupadas impiden confirmar una migración incompleta. Las reglas antiguas que no identifican IVA se archivan con una advertencia; deben confirmarse explícitamente desde cada línea antes de usarlas automáticamente. No se asume que una sugerencia histórica equivale a una identidad fiscal verificada.
+
+Para copiar archivos y journals de la instalación anterior sin modificarla, el procedimiento de mantenimiento sigue disponible:
 
 ```powershell
 .venv\Scripts\python.exe migrar_datos.py "RUTA_DE_LA_INSTALACION_ANTERIOR"
 ```
 
-No sobreescribe datos ya presentes ni copia cookies o perfiles de Chrome. Conserva los journals de cargas, copia las entradas y la base histórica. Catálogos y relaciones guardados únicamente en el navegador se deben exportar desde el Cerecito anterior e importar en el nuevo: el origen cambia de `file://` a HTTP local.
+Ese script conserva la instalación anterior y no copia cookies ni perfiles. La migración íntegra del histórico de reglas y la recuperación de cabeceras parciales desde la UI todavía requieren el trabajo descrito en [VALIDACION.md](docs/VALIDACION.md). La página `legacy.html` se conserva como referencia de la interfaz previa; el flujo diario usa la página principal y SQLite.
 
-La configuración privada existente ya está separada en la carpeta de datos local de esta entrega. Un clon en otra computadora necesita configurar su empresa y sesión; los XML por sí solos no aportan esos datos.
-
-## Estado de esta entrega
-
-Es una **base de migración**, no la nueva experiencia terminada. La interfaz abre con datos separados y el motor conserva su funcionamiento anterior. La carga desde botones, las confirmaciones sin consola, la elección independiente de crédito/contado y la base SQLite se implementan con el prompt de `docs/PROMPT_IMPLEMENTACION.md`.
-
-La entrada anterior del motor sigue siendo `src/backend/iniciar_bot.py`; ejecutarla requiere la interfaz local abierta, la configuración externa y los archivos de entrada. No ejecutar simultáneamente esta copia y la instalación original contra la misma empresa.
-
-Los cambios de Tamareo y Luissi que habían quedado en preparación no se mezclaron con esta copia: el prompt los incluye como casos que la nueva implementación debe resolver.
-
-## Verificación
+## Desarrollo y comprobación
 
 ```powershell
-python -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-Estas comprobaciones validan estructura y aislamiento. No guardan comprobantes en Zeta. La validación funcional de la nueva implementación debe añadir las pruebas de aceptación del prompt.
-
+Las pruebas usan empresas y XML sintéticos, Zeta simulado y un servidor HTTP temporal. La prueba de navegador utiliza Chrome local en modo headless; se omite si no está instalado. No se guardan facturas de producción durante la suite. El resultado y el alcance de comprobación están en [docs/VALIDACION.md](docs/VALIDACION.md).

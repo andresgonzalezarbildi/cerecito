@@ -357,7 +357,9 @@ def screenshots(page, base, key, tag):
 def load_and_recheck(base):
     # Obligatorio leer de nuevo el Excel antes de procesar: no confiar en colas viejas.
     datafile = one_file(base / 'entrada' / 'cerecito', '.json')
-    xlsx = one_file(base / 'entrada' / 'zeta', '.xlsx')
+    histories=sorted(p for p in (base/'entrada/zeta').glob('*.xlsx') if not p.name.startswith('~$'))
+    if not histories:raise BotError('Falta historico Zeta (.xlsx).')
+    origin=histories[0].name if len(histories)==1 else [p.name for p in histories]
     docs = json_load(datafile)
     queue_path = base / 'salida' / 'cola.json'
     if not queue_path.exists():
@@ -365,13 +367,17 @@ def load_and_recheck(base):
     queue = json_load(queue_path)
     if queue.get('formato') != 'cerecito-cola-v1':
         raise BotError('Formato de cola no reconocido')
-    if queue.get('origenZeta') != xlsx.name:
+    if queue.get('origenZeta') != origin:
         raise BotError('Cambió el Excel de Zeta: ejecutá procesar.bat otra vez')
-    if queue.get('sha256Zeta') != hashlib.sha256(xlsx.read_bytes()).hexdigest() or queue.get('sha256Cerecito') != hashlib.sha256(datafile.read_bytes()).hexdigest():
+    if queue.get('sha256Zeta') != hashlib.sha256(b''.join(p.read_bytes() for p in histories)).hexdigest() or queue.get('sha256Cerecito') != hashlib.sha256(datafile.read_bytes()).hexdigest():
         raise BotError('Cambió el contenido del JSON/Excel o la cola es antigua: ejecutá procesar.bat')
     if not docs.get('comprobantes'):
         raise BotError('JSON Cerecito sin facturas')
-    excelrows, sheets = read_excel(xlsx)
+    excelrows,sheets=[],[]
+    for history in histories:
+        rows,metadata=read_excel(history)
+        excelrows.extend(rows)
+        sheets.extend(metadata)
     statuses = {r['clave']: r['estado'] for r in evaluate(docs['comprobantes'], excelrows,
                already_registered(base / 'estado' / 'confirmados.jsonl'), sheets)}
     raw = {invoice_id(i): i for i in docs['comprobantes']}
@@ -402,9 +408,9 @@ def run(base, cfg_path, *, guardar=False, limitar=1):
     if not config.get('url') or 'CONFIGURAR' in str(config['url']):
         raise BotError('Configurá URL y selectores de Zeta; el informe previo está listo')
     if guardar:
-        excel = one_file(base / 'entrada' / 'zeta', '.xlsx')
+        histories=[p for p in (base/'entrada/zeta').glob('*.xlsx') if not p.name.startswith('~$')]
         max_hours = int(config.get('excel_max_age_horas', 24))
-        if max_hours < 1 or time.time() - excel.stat().st_mtime > max_hours * 3600:
+        if max_hours < 1 or any(time.time() - p.stat().st_mtime > max_hours * 3600 for p in histories):
             raise BotError(f'El XLSX de Zeta tiene más de {max_hours} horas: descargá uno actualizado')
     ambiguous = unresolved_attempts(base / 'estado' / 'intentos.jsonl')
     eligible = []

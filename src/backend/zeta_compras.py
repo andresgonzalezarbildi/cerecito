@@ -52,7 +52,7 @@ def unit_price(line):
 
 def input_price(line,mode):
     net=unit_price(line)
-    # Modalidad O verificada en Visualizar de Finesa A-944453, ID 10299:
+    # Modalidad O observada en el formulario de visualización:
     # precio ingresado 7121,97000, cantidad 1, base 7121,97 e IVA 1566,83.
     # Mantener la modalidad del proveedor; no modificar su ficha maestra.
     if mode in {'N','O'}:return net
@@ -121,24 +121,34 @@ def set_control(page, selector, value):
     actual = control.input_value()
     if actual != str(value):
         # GeneXus normaliza números a su máscara local.
-        if selector.replace('#v','#',1) in {'#LINCANTIDAD','#LINPRECIO1','#LINDTO1','#LINDTO2','#LINDTO3'}:
+        if selector.startswith('#FPIMPORTE_') or selector.replace('#v','#',1) in {'#DOCTC','#LINCANTIDAD','#LINPRECIO1','#LINDTO1','#LINDTO2','#LINDTO3'}:
             if money(actual) == Decimal(str(value).replace(',','.')):
                 return
         raise RuntimeError('Zeta cambió o truncó el valor de ' + selector)
 
 
-def refresh_list(page, start, end, number, *, require_complete=True):
+def refresh_list(page, start, end, number, *, require_complete=True, stop_when=None):
+    import re
+    pagination=page.locator('#GRIDPAGINATIONBARContainer_DVPaginationBar')
+    current=re.search(r'(\d+)\s+de\s+(\d+)',pagination.inner_text())
+    if current and int(current[1])>1:
+        with page.expect_response(lambda r:urlsplit(r.url).path=='/z.gestion.comprobantes.compras' and r.request.method=='POST',timeout=60000) as reset:
+            page.evaluate("gx.O.GRIDPAGINATIONBARContainer.SelectedPage='1';gx.O.GRIDPAGINATIONBARContainer.ChangePage()")
+        reset.value.finished()
+        wait_value(lambda:pagination.inner_text(),lambda text:bool(re.search(r'\b1\s+de\s+\d+',text)),'No se pudo volver a la primera pagina de consulta.')
     for selector, value in [('#vDOCFECHA1',start),('#vDOCFECHA1_TO',end),('#vFILTERFULLTEXT',number)]:
         set_control(page, selector, value)
-    # Evento REFRESH observado en compras.js: usa el estado del formulario abierto.
+    # Wait for the response body and GeneXus rendering before reading the grid.
     with page.expect_response(lambda r: urlsplit(r.url).path == '/z.gestion.comprobantes.compras'
-                              and r.request.method == 'POST', timeout=60000):
+                              and r.request.method == 'POST', timeout=60000) as response:
         page.evaluate("gx.O.executeServerEvent('REFRESH', true, null, false, false)")
-    page.wait_for_timeout(500)
+    response.value.finished()
+    wait_value(lambda:page.evaluate('!gx.evt.processing && !gx.spa.isNavigating()'),bool,'La consulta sigue procesando.')
     values = {s:page.locator(s).input_value() for s in ['#vDOCFECHA1','#vDOCFECHA1_TO','#vFILTERFULLTEXT']}
     if list(values.values()) != [start,end,number]:
         raise RuntimeError('Zeta alteró el rango o el filtro de duplicados.')
-    rows = page.locator('#GridContainerTbl').evaluate('''table => [...table.querySelectorAll('tbody tr')].map(row=>({
+    def read_rows():
+        return page.locator('#GridContainerTbl').evaluate('''table => [...table.querySelectorAll('tbody tr')].map(row=>({
         text:row.innerText,
         number:row.querySelector('[id^="span_DOCNUMERO_"]')?.textContent?.trim(),
         series:row.querySelector('[id^="span_DOCSERIE_"]')?.textContent?.trim(),
@@ -146,12 +156,38 @@ def refresh_list(page, start, end, number, *, require_complete=True):
         docid:row.querySelector('[id^="span_DOCID_"]')?.textContent?.trim(),
         edit:row.querySelector('[id^="span_vEDITAR_"]')?.id
     }))''')
-    pages = page.locator('#GRIDPAGINATIONBARContainer_DVPaginationBar').inner_text()
+    rows=read_rows()
+    pagination=page.locator('#GRIDPAGINATIONBARContainer_DVPaginationBar')
+    pages = pagination.inner_text()
     if not rows and 'No se encontraron registros' in pages:
-        return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':[]}
-    if '1 de 1' not in pages and (require_complete or not rows):
-        raise RuntimeError('La consulta de duplicados está paginada: requiere revisión.')
-    return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':rows,'consulta_completa':'1 de 1' in pages}
+        return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':[],'consulta_completa':True,'paginas':0}
+    import re
+    match=re.search(r'(\d+)\s+de\s+(\d+)',pages)
+    if not match or int(match[1])!=1 or not 1<=int(match[2])<=10000:
+        raise RuntimeError('No se pudo comprobar la primera página de la búsqueda. Reintentá la consulta.')
+    total_pages=int(match[2])
+    def presence_found():
+        return stop_when is not None and any(stop_when(row) for row in rows)
+    if presence_found():
+        return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':rows,'consulta_completa':total_pages==1,'paginas':total_pages}
+    seen={r.get('docid') for r in rows if r.get('docid')}
+    for number_page in range(2,total_pages+1):
+        next_page=pagination.locator('li.next:not(.disabled) a')
+        if next_page.count()!=1:raise RuntimeError('Falta la siguiente página; búsqueda incompleta.')
+        with page.expect_response(lambda r:urlsplit(r.url).path=='/z.gestion.comprobantes.compras' and r.request.method=='POST',timeout=60000) as next_response:
+            click_readonly(next_page)
+        next_response.value.finished()
+        wait_value(lambda:page.evaluate('!gx.evt.processing && !gx.spa.isNavigating()'),bool,'La pagina sigue procesando.')
+        wait_value(lambda:pagination.inner_text(),lambda text:bool(re.search(r'\b'+str(number_page)+r'\s+de\s+'+str(total_pages)+r'\b',text)),'La paginación cambió durante la búsqueda.')
+        if [page.locator(s).input_value() for s in ['#vDOCFECHA1','#vDOCFECHA1_TO','#vFILTERFULLTEXT']]!=[start,end,number]:
+            raise RuntimeError('Los filtros cambiaron al avanzar de página.')
+        following=read_rows()
+        ids={r.get('docid') for r in following if r.get('docid')}
+        if not following or seen.intersection(ids):raise RuntimeError('Página vacía o repetida; la búsqueda no está completa.')
+        seen.update(ids);rows.extend(following)
+        if presence_found():
+            return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':rows,'consulta_completa':number_page==total_pages,'paginas':total_pages}
+    return {'fecha':stamp(),'desde':start,'hasta':end,'numero':number,'filas':rows,'consulta_completa':True,'paginas':total_pages}
 
 
 def check_duplicates(page, invoice, positive_proof=None):
@@ -228,11 +264,11 @@ def select_supplier_exact(page, supplier, *, confirm_supplier=None):
 
 
 def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=None):
-    codes={'Compra Crédito':'21','Compra Crédito Gastos':'26'}
+    codes={'Compra Crédito':'21','Compra Crédito Gastos':'26','Compra Contado':'23','Compra Contado Gastos':'28'}
     if form not in codes or invoice['zeta']['comprobante']!=form:
         raise RuntimeError('Formulario fuera de los tipos capturados.')
     click_readonly(page.locator('#DDO_AGAGREGARContainer_btnGroupDrop'))
-    menu_form='Compra Crédito'
+    menu_form='Compra Contado' if form.startswith('Compra Contado') else 'Compra Crédito'
     links=page.locator('a').filter(has_text=menu_form)
     matches=[links.nth(i) for i in range(links.count()) if links.nth(i).inner_text().strip()==menu_form
              and (links.nth(i).get_attribute('href') or '').startswith('z.gestion.comprobantes.facturaproveedor?')]
@@ -242,7 +278,7 @@ def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=No
     wait_path(page,'/z.gestion.comprobantes.facturaproveedor')
     if page.locator('#CMPIDDOC').input_value()!=codes[form]:
         options=page.locator('#CMPIDDOC option').evaluate_all('options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))')
-        labels={'21':'21-C.Crédito','26':'26-Créd.Gasto'}
+        labels={'21':'21-C.Crédito','26':'26-Créd.Gasto','23':'23-C.Contado','28':'28-Cont.Gasto'}
         if not any(o=={'value':codes[form],'text':labels[codes[form]]} for o in options):raise RuntimeError('Tipo diferente del catálogo capturado.')
         page.locator('#CMPIDDOC').select_option(value=codes[form])
         page.locator('#CMPIDDOC').press('Tab')
@@ -251,6 +287,11 @@ def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=No
     if page.locator('#CMPIDDOC').input_value()!=codes[form]: raise RuntimeError('Formulario diferente del esperado: '+form)
     if page.locator('#DOCID').input_value()!='0':raise RuntimeError('El formulario no es un comprobante nuevo.')
     c=invoice['cfe']
+    currency_code={'UYU':'1','USD':'2'}.get(c['moneda'])
+    if not currency_code:raise RuntimeError('Moneda no soportada.')
+    currency_options=page.locator('#MNDIDDOC option').evaluate_all('els=>els.map(e=>({value:e.value,text:e.textContent.trim()}))')
+    expected_currency={'1':'1 - $','2':'2 - U$S'}[currency_code]
+    if {'value':currency_code,'text':expected_currency} not in currency_options:raise RuntimeError('La moneda del formulario cambio.')
     center=invoice['zeta'].get('centroCosto') or ''
     options=page.locator('#CENIDDOC option').evaluate_all('options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))')
     matches=[o['value'] for o in options if o['value']==center]
@@ -259,7 +300,15 @@ def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=No
     center_code=matches[0]
     fields=[('#DOCSERIE',c['serie']),('#DOCNUMERO',c['numero']),
                            ('#DOCFECHA1',date.fromisoformat(c['fecha']).strftime('%d/%m/%y')),
-                           ('#MNDIDDOC','1'),('#CENIDDOC',center_code)]
+                           ('#MNDIDDOC',currency_code),('#CENIDDOC',center_code)]
+    if form.startswith('Compra Contado'):
+        cashbox=page.locator('#CAJAIDDOC').input_value()
+        if cashbox in {'','0'}:raise RuntimeError('Zeta no tiene una caja seleccionada para contado.')
+        fields.append(('#CAJAIDDOC',cashbox))
+    if currency_code=='2':
+        rate=Decimal(c.get('tipoCambio') or '0')
+        if not rate.is_finite() or rate<=0:raise RuntimeError('Falta cotizacion original del XML.')
+        fields.append(('#DOCTC',localized(rate)))
     for selector,value in fields:
         set_control(page,selector,value)
     if confirm_supplier is None:select_supplier_exact(page, invoice['proveedor'])
@@ -271,6 +320,8 @@ def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=No
         raise RuntimeError('Depósitos distintos de los observados: no se inventan valores.')
     if page.locator('#DOCNUMERO').input_value()!=c['numero'] or page.locator('#DOCSERIE').input_value()!=c['serie']:
         raise RuntimeError('La cabecera cambió después de elegir proveedor.')
+    if page.locator('#MNDIDDOC').input_value()!=currency_code:raise RuntimeError('La moneda cambio al elegir el proveedor.')
+    if currency_code=='2' and money(page.locator('#DOCTC').input_value())!=rate:raise RuntimeError('La cotizacion no coincide con el XML.')
     if page.locator('#CENIDDOC').input_value()!=center_code:
         raise RuntimeError('Centro de costos distinto del indicado.')
 
@@ -280,13 +331,62 @@ def read_totals(page):
             [('neto','#span_vDOCSUBTOTAL'),('iva','#span_vDOCIVA'),('total','#span_vDOCTOTAL')]}
 
 
+def read_payment_rows(page):
+    return page.locator('#GridContainerTbl').evaluate("""table=>[...table.querySelectorAll('tbody tr')].map(row=>({
+        docid:row.querySelector('[id^="span_DOCID_"]')?.textContent.trim(),
+        name:row.querySelector('[id^="span_FORMAPAGONOM_"]')?.textContent.trim(),
+        currency:row.querySelector('[id^="span_MNDIDFP_"]')?.textContent.trim(),
+        amount:row.querySelector('[id^="span_FPIMPORTE_"]')?.textContent.trim()
+    })).filter(row=>row.docid)""")
+
+
+def finish_cash_payment(page,invoice,state,state_path):
+    if not invoice['zeta']['comprobante'].startswith('Compra Contado'):return
+    total=Decimal(state['totales']['total'])
+    currency={'UYU':'1','USD':'2'}[invoice['cfe']['moneda']]
+    code=invoice['zeta'].get('formaPago')
+    name=invoice['zeta'].get('formaPagoNombre','').strip().casefold()
+    if not code or not name:raise ValueError('Falta la forma de pago del catalogo.')
+    def verified(rows):
+        return len(rows)==1 and rows[0]['docid']==state['docid'] and rows[0]['name'].casefold()==name and rows[0]['currency']==currency and money(rows[0]['amount'])==total
+    click_readonly(page.locator('#BTNFORMAPAGO'))
+    wait_path(page,'/z.gestion.comprobantes.egresoscajafp')
+    if money(page.locator('#vDOCTOTAL').input_value())!=total:raise ValueError('La forma de pago pertenece a otro total.')
+    rows=read_payment_rows(page)
+    if not verified(rows):
+        if rows and (len(rows)!=1 or rows[0]['docid']!=state['docid'] or money(rows[0]['amount'])!=total):
+            raise ValueError('Hay pagos distribuidos que requieren revisar antes de reemplazar.')
+        page.locator('#BTNENTER').click()
+        wait_path(page,'/z.gestion.comprobantes.egresocajafp')
+        if page.locator('#DOCID').input_value()!=state['docid'] or money(page.locator('#DOCTOTAL').input_value())!=total:
+            raise ValueError('El editor de pago pertenece a otro comprobante.')
+        options=page.locator('#FORMAPAGOID_0001 option').evaluate_all('els=>els.map(o=>({value:o.value,text:o.textContent.trim()}))')
+        if not any(o['value']==code and o['text'].casefold()==name for o in options):raise ValueError('La forma de pago difiere del catalogo.')
+        for index in range(2,page.locator('[id^="FPIMPORTE_"]').count()+1):
+            if money(page.locator('#FPIMPORTE_'+str(index).zfill(4)).input_value())!=0:raise ValueError('El pago tiene otras filas con importe.')
+        page.locator('#FORMAPAGOID_0001').select_option(value=code)
+        page.locator('#FORMAPAGOID_0001').press('Tab')
+        wait_value(lambda:page.evaluate('!gx.evt.processing && !gx.spa.isNavigating()'),bool,'Zeta sigue validando el medio de pago.')
+        page.locator('#MNDIDFP_0001').focus()
+        set_control(page,'#MNDIDFP_0001',currency)
+        page.locator('#FPIMPORTE_0001').focus()
+        set_control(page,'#FPIMPORTE_0001',localized(total))
+        if currency=='2':set_control(page,'#DOCTC',localized(invoice['cfe']['tipoCambio']))
+        confirm_once(page,state,'forma_pago',state_path=state_path)
+        wait_path(page,'/z.gestion.comprobantes.egresoscajafp')
+        page.reload(wait_until='load');wait_path(page,'/z.gestion.comprobantes.egresoscajafp')
+        if not verified(read_payment_rows(page)):raise ValueError('Zeta no conserva la forma de pago y el importe elegidos.')
+    state['pago_verificado']={'codigo':code,'nombre':invoice['zeta']['formaPagoNombre'],'moneda':invoice['cfe']['moneda'],'importe':str(total)}
+
+
 def confirm_once(page, state, phase, selector='#BTNTRN_ENTER', *, state_path=None):
+    if not state_path or not state.get('clave'):raise ValueError('Falta identidad o archivo de estado para confirmar.')
     wait_value(lambda:page.evaluate("gx.isInputEnabled() && !gx.evt.processing && !gx.spa.isNavigating() && gx.evt.canExecuteEvent('EENTER.')"),
                bool, 'GeneXus aún está validando campos; no se confirma.')
     state.update(estado='INICIANDO_GUARDADO', etapa=phase, fecha=stamp())
     persisted={key:value for key,value in state.items() if key!='plan'} if state_path else state
-    save_state(state_path or STATE,persisted)
-    append_ledger(BASE/'estado/intentos.jsonl',{'clave':state.get('clave',KEY),'estado':'INICIANDO_GUARDADO','etapa':phase,'fecha':stamp()})
+    save_state(state_path,persisted)
+    append_ledger(BASE/'estado/intentos.jsonl',{'clave':state['clave'],'estado':'INICIANDO_GUARDADO','etapa':phase,'fecha':stamp()})
     # Una sola ejecución: el llamador verifica resultado o deja INCIERTO.
     control=page.locator(selector)
     if control.count()!=1: raise RuntimeError('Confirmar ausente o ambiguo.')

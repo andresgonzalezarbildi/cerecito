@@ -6,7 +6,12 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 CODE_DIR=ROOT/'src/backend'
 APP_DIR=ROOT/'src/web'
-DATA_DIR=Path(os.environ.get('CERECITO_DATA_DIR',str(ROOT.parent/'cerecito-datos-locales'))).expanduser().resolve()
+PREFERENCES=Path(os.environ.get('LOCALAPPDATA',str(Path.home()/'.config')))/'Cerecito/runtime.json'
+def default_data_directory():
+    if os.environ.get('CERECITO_DATA_DIR'):return os.environ['CERECITO_DATA_DIR']
+    if PREFERENCES.is_file():return json.loads(PREFERENCES.read_text(encoding='utf-8'))['data_dir']
+    return str(ROOT.parent/'cerecito-datos-locales')
+DATA_DIR=Path(default_data_directory()).expanduser().resolve()
 APP_URL='http://127.0.0.1:'+os.environ.get('CERECITO_UI_PORT','8765')+'/'
 
 def initialize():
@@ -33,3 +38,25 @@ def control_value(field):
 
 def category_provider_rut():
     return str(config().get('proveedor_destinos_por_producto') or '__no_configurado__')
+
+def select_initial_data_directory(value):
+    """Wizard preference; the explicit environment variable always takes precedence."""
+    global DATA_DIR
+    if os.environ.get('CERECITO_DATA_DIR'):
+        raise ValueError('La carpeta está fijada por CERECITO_DATA_DIR. Cambiá esa variable antes de abrir Cerecito.')
+    candidate=Path(value).expanduser()
+    if not candidate.is_absolute() or candidate.resolve()==Path(candidate.anchor):
+        raise ValueError('Elegí una carpeta absoluta de datos, no la raíz de una unidad.')
+    candidate=candidate.resolve()
+    if candidate==ROOT or ROOT in candidate.parents:
+        raise ValueError('Los datos deben quedar fuera del repositorio.')
+    previous=DATA_DIR
+    try:
+        DATA_DIR=candidate
+        initialize()
+        PREFERENCES.parent.mkdir(parents=True,exist_ok=True)
+        PREFERENCES.write_text(json.dumps({'data_dir':str(candidate)}),encoding='utf-8')
+    except Exception:
+        DATA_DIR=previous
+        raise
+    return DATA_DIR

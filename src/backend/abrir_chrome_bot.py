@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import time
 from urllib.request import build_opener, ProxyHandler
+from urllib.parse import urlsplit
 
 from conciliar import BASE
 
@@ -27,7 +28,10 @@ def main():
         info = version()
         print('Chrome de automatización ya está abierto en ' + ENDPOINT)
         print('Navegador: ' + info.get('Browser', 'Chrome'))
-        return 0
+        with build_opener(ProxyHandler({})).open(ENDPOINT + '/json/list', timeout=2) as response:
+            targets = json.load(response)
+        if any(t.get('type') == 'page' and urlsplit(t.get('url', '')).hostname == 'www.zetasoftware.com' for t in targets):
+            return 0
     except OSError:
         pass
     candidates = [Path(os.environ.get('PROGRAMFILES', r'C:\Program Files')) / 'Google/Chrome/Application/chrome.exe',

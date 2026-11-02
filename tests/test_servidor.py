@@ -14,9 +14,9 @@ import launcher
 
 class ServerTests(unittest.TestCase):
     def test_ui_and_external_data_are_served_without_zeta(self):
-        with tempfile.TemporaryDirectory(dir=ROOT.parent,prefix='cerecito-test-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='cerecito-test-') as temporary:
             data=Path(temporary).resolve()
-            self.assertTrue(data.is_relative_to(ROOT.parent.resolve()))
+            self.assertFalse(data.is_relative_to(ROOT.resolve()))
             (data/'base_historica.js').write_text('const DB={catalog:[]};',encoding='utf-8')
             with patch.object(launcher,'DATA_DIR',data):
                 server=ThreadingHTTPServer(('127.0.0.1',0),launcher.Handler)
@@ -24,7 +24,7 @@ class ServerTests(unittest.TestCase):
                 opener=build_opener(ProxyHandler({}));base=f'http://127.0.0.1:{server.server_port}'
                 try:
                     with opener.open(base+'/api/health',timeout=2) as response:
-                        self.assertFalse(json.load(response)['bot_desde_interfaz'])
+                        self.assertTrue(json.load(response)['bot_desde_interfaz'])
                     with opener.open(base+'/',timeout=2) as response:
                         self.assertIn(b'Cerecito',response.read())
                     with opener.open(base+'/js/data.js',timeout=2) as response:

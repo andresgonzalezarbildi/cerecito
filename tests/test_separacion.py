@@ -17,9 +17,9 @@ class SeparationTests(unittest.TestCase):
             ast.parse(file.read_text(encoding='utf-8-sig'),filename=str(file))
 
     def test_initialize_writes_only_external_data(self):
-        with tempfile.TemporaryDirectory(dir=ROOT.parent,prefix='cerecito-test-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='cerecito-test-') as temporary:
             data=Path(temporary).resolve()
-            self.assertTrue(data.is_relative_to(ROOT.parent.resolve()))
+            self.assertFalse(data.is_relative_to(ROOT.resolve()))
             with patch.object(runtime_paths,'DATA_DIR',data):
                 runtime_paths.initialize()
                 self.assertTrue((data/'entrada/xml').is_dir())

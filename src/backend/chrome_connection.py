@@ -1,4 +1,4 @@
-"""Conexión al Chrome habitual. Nunca lanza ni cierra navegadores/pestañas."""
+"""Conexión a Chrome; apertura automática del perfil exclusivo de Cerecito."""
 from __future__ import annotations
 
 from runtime_paths import DATA_DIR, CODE_DIR, APP_DIR, APP_URL, company_rut, control_value, category_provider_rut
@@ -8,6 +8,7 @@ import os
 import re
 import time
 import atexit
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import build_opener, ProxyHandler
@@ -63,6 +64,10 @@ def websocket_endpoint(endpoint):
 def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False):
     config = config or {}
     endpoint = endpoint or os.environ.get('CERECITO_CHROME_ENDPOINT') or config.get('chrome', {}).get('endpoint') or 'http://127.0.0.1:9222'
+    managed=endpoint.rstrip('/') == 'http://127.0.0.1:9223'
+    if managed:
+        from abrir_chrome_bot import main as open_bot
+        open_bot()
     endpoint = websocket_endpoint(endpoint)
     print('Conectando al Chrome configurado:', endpoint, flush=True)
     if endpoint.endswith('/devtools/browser'):
@@ -77,9 +82,18 @@ def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False)
         configured = config.get('url', '')
         host = urlparse(configured).hostname if configured.startswith('https://') else None
         candidates = [t for t in targets if (urlparse(t['url']).hostname == host if host else 'zeta' in (t['url'] + ' ' + t['title']).lower())]
+        target_file=DATA_DIR/'estado/chrome_target.json'
+        pinned=json.loads(target_file.read_text(encoding='utf-8')).get('target_id') if target_file.exists() else None
+        pinned_candidates=[t for t in candidates if t['targetId']==pinned]
+        if len(pinned_candidates)==1:candidates=pinned_candidates
         if len(candidates)>1 and urlparse(configured).path.startswith('/z.gestion.comprobantes.'):
-            purchases=[t for t in candidates if urlparse(t['url']).path.startswith('/z.gestion.comprobantes.')]
+            purchases=[t for t in candidates if urlparse(t['url']).path=='/z.gestion.comprobantes.compras']
             if len(purchases)==1:candidates=purchases
+            else:
+                workflow_pages=[t for t in candidates if urlparse(t['url']).path in {'/z.gestion.comprobantes.facturaproveedor','/z.gestion.comprobantes.facturacompra','/z.gestion.comprobantes.lineacompras','/z.gestion.comprobantes.lineagastos','/z.gestion.comprobantes.egresoscajafp'}]
+                if len(workflow_pages)==1:candidates=workflow_pages
+                configured_pages=[t for t in candidates if urlparse(t['url']).path==urlparse(configured).path]
+                if len(configured_pages)==1:candidates=configured_pages
         if len(candidates) != 1:
             if not interactive:
                 raise ChromeError(f'Hay {len(candidates)} pestañas de Zeta identificables. No se elige otra automáticamente.')
@@ -91,12 +105,12 @@ def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False)
             chosen = targets[int(answer) - 1]
         else:
           chosen = candidates[0]
-        if 'ingresar' in chosen.get('title','').lower() and urlparse(chosen['url']).path=='/z.info.inicio':
-            raise ChromeError('La sesión de Zeta venció. Iniciá sesión en el Chrome del bot y abrí la empresa; no se guardó nada.')
+        target_file.parent.mkdir(parents=True,exist_ok=True)
+        target_file.write_text(json.dumps({'target_id':chosen['targetId']}),encoding='utf-8')
         print('Pestaña seleccionada:', chosen['url'].split('?', 1)[0], flush=True)
         bridge = ScopedCDP(endpoint, chosen['targetId'], initial_websocket=upstream)
         endpoint = bridge.url
-        browser = playwright.chromium.connect_over_cdp(endpoint, no_defaults=True, timeout=45000)
+        browser = playwright.chromium.connect_over_cdp(endpoint, no_defaults=not managed, timeout=45000)
     except (PlaywrightError, OSError, ValueError, ChromeError) as exc:
         if bridge:
             bridge.close()

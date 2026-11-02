@@ -302,16 +302,6 @@ def invoice_issues(inv):
         warnings.append('Número CFE cero: identificación ambigua')
     if inv.get("excluido"):
         warnings.append("Marcada No cargar en Cerecito")
-    if digits(p.get('rut'))==category_provider_rut() and cfe_kind(c.get('tipo')):
-        destination=inv.get('zeta',{}).get('destinoCompra')
-        choices=[line.get('destinoCompra') for line in inv.get('lineas',[])]
-        has_choices=any('destinoCompra' in line for line in inv.get('lineas',[]))
-        if destination not in {'foods','housekeeping','mixed'} or (has_choices and any(value not in {'foods','housekeeping'} for value in choices)):
-            warnings.append('Finesa: elegir Alimentos y bebidas o Housekeeping para cada producto en Cerecito → Correlaciones → Comprobantes')
-        elif destination=='mixed' and (not choices or set(choices)!={'foods','housekeeping'}):
-            warnings.append('Finesa: usos mixtos sin selección válida de todos los productos')
-        elif destination!='mixed' and has_choices and any(value!=destination for value in choices):
-            warnings.append('Finesa: la selección de los productos no coincide con el destino de la factura')
     if not inv.get("completo") or inv.get("estado") not in {"auto", "reviewed"}:
         alerts=inv.get('alertas',[])
         warnings.append('Cerecito: '+ '; '.join(alerts) if alerts else 'Pendiente o incompleta en Cerecito')
@@ -487,7 +477,9 @@ def run(base=BASE):
     old_queue = base / "salida" / "cola.json"
     old_queue.unlink(missing_ok=True)
     infile = one_file(base / "entrada" / "cerecito", ".json")
-    zeta = one_file(base / "entrada" / "zeta", ".xlsx")
+    zetas = sorted(p for p in (base / 'entrada/zeta').glob('*.xlsx') if not p.name.startswith('~$'))
+    if not zetas:raise ValueError('Importa un historico de Zeta (.xlsx).')
+    zeta = zetas[0]
     data = json.loads(infile.read_text(encoding="utf-8-sig"))
     if data.get("formato") != "cerecito-agente-v1" or not isinstance(data.get("comprobantes"), list):
         raise ValueError("El JSON no es una exportación de 'Exportar para automatización' de Cerecito.")
@@ -496,16 +488,20 @@ def run(base=BASE):
         raise ValueError("El JSON está vacío o contiene CFE sin identificador válido.")
     if len(set(keys)) != len(keys):
         raise ValueError("El JSON contiene claves duplicadas: revisar Cerecito.")
-    rows, sheets = read_excel(zeta)
+    rows, sheets = [], []
+    for history in zetas:
+        file_rows,file_sheets=read_excel(history)
+        rows.extend(file_rows)
+        sheets.extend(file_sheets)
     registered = already_registered(base / "estado" / "confirmados.jsonl")
     result = evaluate(data["comprobantes"], rows, registered, sheets)
     out = base / "salida"
     out.mkdir(parents=True, exist_ok=True)
     write_csv(out / "pendientes_para_zeta.csv", [x for x in result if x["estado"] == "PENDIENTE"])
     write_csv(out / "bloqueadas_o_ya_cargadas.csv", [x for x in result if x["estado"] != "PENDIENTE"])
-    (out / "cola.json").write_text(json.dumps({"formato": "cerecito-cola-v1", "generado": datetime.now().isoformat(), "origenZeta": zeta.name,
+    (out / "cola.json").write_text(json.dumps({"formato": "cerecito-cola-v1", "generado": datetime.now().isoformat(), "origenZeta": zeta.name if len(zetas)==1 else [p.name for p in zetas],
                                                "sha256Cerecito": hashlib.sha256(infile.read_bytes()).hexdigest(),
-                                               "sha256Zeta": hashlib.sha256(zeta.read_bytes()).hexdigest(),
+                                               "sha256Zeta": hashlib.sha256(b''.join(p.read_bytes() for p in zetas)).hexdigest(),
                                                "registrosExcelZeta": len(rows), "hojasZeta": sheets, "facturas": [x for x in result if x["estado"] == "PENDIENTE"]},
                                               ensure_ascii=False, indent=2), encoding="utf-8")
     counts = Counter(x["estado"] for x in result)

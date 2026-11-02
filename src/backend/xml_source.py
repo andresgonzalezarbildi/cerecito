@@ -81,7 +81,7 @@ def parse_xml(content, filename=''):
             'sha256XML':hashlib.sha256(content).hexdigest(),'rut':rut,'receptor':target_rut,
             'nombre':value(emitter,'RznSoc'),'tipo':kind,'serie':series,'numero':str(int(number)),
             'fecha':value(ident,'FchEmis'),'moneda':value(totals,'TpoMoneda','') if kind=='181' else value(totals,'TpoMoneda'),
-            'mntBruto':value(ident,'MntBruto','0'),'formaPagoXML':value(ident,'FmaPago',''),
+            'tipoCambio':value(totals,'TpoCambio',''),'mntBruto':value(ident,'MntBruto','0'),'formaPagoXML':value(ident,'FmaPago',''),
             'ajustesGlobales':bool(nodes[0].findall('.//{*}DscRcgGlobal')),
             'totales':fiscal,'lineas':items,
             'retencionesXML':ET.tostring(nodes[0],encoding='unicode') if kind in {'181','182','183'} else None,
@@ -145,6 +145,12 @@ def ignored_line_indices(source, invoice):
     return indices
 
 
+def non_monetary_line_indices(source):
+    """CFE IndFact=5: entrega gratuita sin importe, no un IVA del 5%."""
+    return [i for i,line in enumerate(source['lineas'])
+            if str(line.get('indicadorIVA',''))=='5' and decimal_value(line.get('monto','0'))==0]
+
+
 def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Decimal('0')):
     """Plan de importes a cinco decimales; no habilita escrituras ni inventa códigos.
 
@@ -154,8 +160,10 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     """
     if source['receptor'] != expected_receiver:
         raise SourceError('El receptor del XML no es la empresa de Zeta.')
-    if source['tipo'] != '111' or source.get('ajustesGlobales'):
-        raise SourceError('Tipo fiscal o ajustes globales no validados para este plan.')
+    if source['tipo'] != '111':
+        raise SourceError('Este comprobante requiere carga manual en Zeta; no es una factura de compra tipo 111.')
+    if source.get('ajustesGlobales'):
+        raise SourceError('Completar en Zeta los descuentos o recargos globales para conservar el total del comprobante.')
     if invoice.get('proveedor',{}).get('rut') != source['rut']:
         raise SourceError('El RUT correlacionado no coincide con el XML.')
     if source['clave'] != invoice.get('clave'):
@@ -173,7 +181,8 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         raise SourceError('Difiere el importe exento/no gravado entre JSON y XML.')
     if source['mntBruto'] not in {'0','1'}:
         raise SourceError('Indicador de montos brutos aún no soportado.')
-    assigned=list(ignored_line_indices(source,invoice))
+    no_monetarias=non_monetary_line_indices(source)
+    assigned=list(ignored_line_indices(source,invoice))+no_monetarias
     result=[]
     bases={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
     taxes={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
@@ -205,21 +214,28 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         bases[indicator]+=base
         taxes[indicator]+=tax
         entry=deepcopy(line)
-        entry.update(montoXML=str(original),cantidadXML=raw['cantidad'],netoPropuesto5Decimales=str(net),
+        entry.update(descripcionXML=raw['descripcion'],montoXML=str(original),cantidadXML=raw['cantidad'],netoPropuesto5Decimales=str(net),
                      baseEsperada=str(base),ivaEsperado=str(tax),totalEsperado=str(base+tax))
         result.append(entry)
     if set(assigned)!=set(range(len(source['lineas']))):
         raise SourceError('Hay líneas XML omitidas; no se completa el plan.')
     expectations={'netoMin':bases['2'],'netoBas':bases['3'],'ivaMin':taxes['2'],'ivaBas':taxes['3']}
-    if abs(bases['1']-cents(source['totales'].get('noGravado','0')))>rounding_tolerance or cents(source['totales'].get('exento','0')) != 0:
+    exempt_total=cents(source['totales'].get('noGravado','0'))+cents(source['totales'].get('exento','0'))
+    if abs(bases['1']-exempt_total)>rounding_tolerance:
         raise SourceError('El importe exento/no gravado de las líneas no reproduce los totales XML.')
     if any(abs(cents(source['totales'][key])-computed)>rounding_tolerance for key,computed in expectations.items()):
         raise SourceError('El redondeo por línea no reproduce las bases/IVA del XML.')
     if abs(sum(bases.values())+sum(taxes.values())-cents(source['totales']['total']))>rounding_tolerance:
-        raise SourceError('El plan no reproduce exactamente el total XML.')
+        raise SourceError('El total calculado difiere '+str(sum(bases.values())+sum(taxes.values())-cents(source['totales']['total']))+'; tolerancia por comprobante '+str(rounding_tolerance)+'. Revisá las líneas y el XML.')
+    differences={key:str(computed-cents(source['totales'][key])) for key,computed in expectations.items() if computed!=cents(source['totales'][key])}
+    total_difference=sum(bases.values())+sum(taxes.values())-cents(source['totales']['total'])
+    if total_difference:differences['total']=str(total_difference)
+    if bases['1']!=exempt_total:differences['exento']=str(bases['1']-exempt_total)
     return {'clave':source['clave'],'sha256XML':source['sha256XML'],'mntBruto':source['mntBruto'],
+            'diferenciasAceptadas':differences,'toleranciaRedondeo':str(rounding_tolerance),
             'lineasIgnoradas':invoice.get('lineasIgnoradas',[]),
-            'totalesXML':{'neto':str(sum((cents(source['totales'].get(k,'0')) for k in ('netoMin','netoBas','noGravado')),Decimal(0))),
+            'lineasNoMonetarias':no_monetarias,
+            'totalesXML':{'neto':str(sum((cents(source['totales'].get(k,'0')) for k in ('netoMin','netoBas','noGravado','exento')),Decimal(0))),
                           'iva':str(cents(source['totales']['ivaMin'])+cents(source['totales']['ivaBas'])),
                           'total':source['totales']['total']},
             'lineas':result,'totales':{**{k:str(v) for k,v in expectations.items()},'noGravado':str(bases['1'])},
