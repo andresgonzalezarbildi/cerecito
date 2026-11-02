@@ -148,6 +148,67 @@ class WorkflowTests(unittest.TestCase):
         plan=preview_net_lines(invoice['source'],invoice['payload'],COMPANY)
         self.assertEqual(plan['lineasNoMonetarias'],[1])
 
+    def test_zero_value_standard_lines_do_not_require_code_or_change_totals(self):
+        from xml_source import preview_net_lines
+        from decimal import Decimal
+        extra=(
+            '<Item><NroLinDet>2</NroLinDet><NomItem>Artículo sin cargo</NomItem>'
+            '<IndFact>3</IndFact><MontoItem>0</MontoItem><Cantidad>0</Cantidad></Item>'
+            '<Item><NroLinDet>3</NroLinDet><NomItem>Artículo gratis exento</NomItem>'
+            '<IndFact>1</IndFact><MontoItem>0.00</MontoItem><Cantidad>1</Cantidad></Item>'
+        )
+        self.store.import_documents('zero.xml', xml(351, extra=extra))
+        key = self.store.invoices()[0]['key']
+        self.store.decide(key, {'mode': 'credit', 'lines': {'0': {'kind': 'article', 'code': 'A1'}}})
+        invoice = self.store.invoices()[0]
+        self.assertEqual(invoice['state'], 'ready')
+        self.assertEqual(invoice['non_monetary_lines'], [1, 2])
+        self.assertEqual(len(invoice['source']['lineas']), 3)
+        self.assertEqual(len(invoice['payload']['lineas']), 1)
+        plan = preview_net_lines(invoice['source'], invoice['payload'], COMPANY)
+        self.assertEqual(plan['lineasNoMonetarias'], [1, 2])
+        self.assertEqual(Decimal(plan['total']), Decimal('100'))
+        self.assertEqual([line['origenes'] for line in plan['lineas']], [[0]])
+
+    def test_zero_lines_never_mask_incorrect_invoice_total(self):
+        from xml_source import preview_net_lines, SourceError
+        from decimal import Decimal
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Sin cargo</NomItem><IndFact>2</IndFact><MontoItem>0</MontoItem><Cantidad>1</Cantidad></Item>'
+        self.store.import_documents('wrong-total.xml', xml(352, '101.01', extra=extra))
+        key = self.store.invoices()[0]['key']
+        self.store.decide(key, {'mode': 'credit', 'lines': {'0': {'kind': 'article', 'code': 'A1'}}})
+        invoice = self.store.invoices()[0]
+        self.assertEqual(invoice['state'], 'needs_review')
+        with self.assertRaisesRegex(SourceError, 'total calculado difiere'):
+            preview_net_lines(invoice['source'], invoice['payload'], COMPANY, Decimal('0'))
+
+    def test_negative_taxable_line_never_dropped_automatically(self):
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Descuento especial</NomItem><IndFact>1</IndFact><MontoItem>-10</MontoItem><Cantidad>1</Cantidad></Item>'
+        self.store.import_documents('negative.xml', xml(353, '90', extra=extra))
+        key = self.store.invoices()[0]['key']
+        self.store.decide(key, {'mode': 'credit', 'lines': {'0': {'kind': 'article', 'code': 'A1'}}})
+        invoice = self.store.invoices()[0]
+        self.assertEqual(invoice['state'], 'manual')
+        self.assertIn('Descuento especial', ' '.join(invoice['reasons']))
+        self.assertIn('negativos', ' '.join(invoice['reasons']))
+        self.assertEqual(invoice['non_monetary_lines'], [])
+        self.assertIsNone(invoice['plan'])
+
+    def test_only_zero_lines_never_create_empty_purchase(self):
+        content=xml(354, '0').replace(b'<MntNoGrv>100</MntNoGrv>', b'<MntNoGrv>0</MntNoGrv>').replace(b'<MontoItem>100</MontoItem>', b'<MontoItem>0</MontoItem>')
+        self.store.import_documents('empty.xml', content)
+        invoice = self.store.invoices()[0]
+        self.assertEqual(invoice['state'], 'manual')
+        self.assertIn('factura vacía', ' '.join(invoice['reasons']))
+        self.assertEqual(invoice['payload']['lineas'], [])
+
+    def test_positive_amount_with_zero_quantity_stays_manual(self):
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Cantidad no válida</NomItem><IndFact>1</IndFact><MontoItem>10</MontoItem><Cantidad>0</Cantidad></Item>'
+        self.store.import_documents('wrong-quantity.xml', xml(355, '110', extra=extra))
+        invoice = self.store.invoices()[0]
+        self.assertEqual(invoice['state'], 'manual')
+        self.assertIn('Cantidad no válida', ' '.join(invoice['reasons']))
+
     def test_special_indicator_12_never_treated_as_12_percent(self):
         self.store.import_documents('suspenso.xml',xml(349,indicator='12'))
         invoice=self.store.invoices()[0]

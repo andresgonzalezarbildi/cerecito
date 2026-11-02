@@ -146,9 +146,14 @@ def ignored_line_indices(source, invoice):
 
 
 def non_monetary_line_indices(source):
-    """CFE IndFact=5: entrega gratuita sin importe, no un IVA del 5%."""
-    return [i for i,line in enumerate(source['lineas'])
-            if str(line.get('indicadorIVA',''))=='5' and decimal_value(line.get('monto','0'))==0]
+    """Líneas sin valor contable: regalos (5) o ítems 1/2/3 de monto cero.
+
+    Sólo se omiten si los totales XML siguen cuadrando. Un descuento o ajuste
+    negativo no es una línea de cero y nunca se descarta automáticamente.
+    """
+    return [i for i, line in enumerate(source['lineas'])
+            if str(line.get('indicadorIVA','')) in {'1', '2', '3', '5'}
+            and decimal_value(line.get('monto', '0')) == 0]
 
 
 def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Decimal('0')):
@@ -183,6 +188,8 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         raise SourceError('Indicador de montos brutos aún no soportado.')
     no_monetarias=non_monetary_line_indices(source)
     assigned=list(ignored_line_indices(source,invoice))+no_monetarias
+    if len(set(assigned)) != len(assigned):
+        raise SourceError('Una línea sin importe no puede ignorarse dos veces.')
     result=[]
     bases={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
     taxes={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
@@ -206,8 +213,13 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
             raise SourceError('El importe original de Cerecito difiere del XML.')
         rate={'1':Decimal('0'),'2':Decimal('0.10'),'3':Decimal('0.22')}[indicator]
         original=decimal_value(raw['monto'])
-        if original <= 0 or decimal_value(raw['cantidad']) <= 0:
-            raise SourceError('Línea nula/negativa sin flujo específico validado.')
+        if original < 0:
+            raise SourceError('Línea '+str(index+1)+' con importe negativo ('+str(original)+
+                              '): requiere revisar el descuento/ajuste en Zeta; no se puede omitir ni convertir a cero.')
+        if original == 0:
+            raise SourceError('La línea '+str(index+1)+' tiene importe cero y no debe cargarse en Zeta.')
+        if decimal_value(raw['cantidad']) <= 0:
+            raise SourceError('Línea '+str(index+1)+' con importe positivo y cantidad nula/negativa; revisar el XML.')
         net=(original/(1+rate) if source['mntBruto']=='1' else original).quantize(PRECISION,rounding=ROUND_HALF_UP)
         base=cents(net)
         tax=cents(net*rate)

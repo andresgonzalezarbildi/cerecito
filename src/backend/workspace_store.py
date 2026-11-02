@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from xml_source import read_zip_documents, read_xml_documents, preview_net_lines
+from xml_source import read_zip_documents, read_xml_documents, preview_net_lines, non_monetary_line_indices
 
 
 def now():
@@ -406,9 +406,16 @@ class Store:
                 if str(raw.get('indicadorIVA','')) not in {'1','2','3','6','7'}
                 and not (str(raw.get('indicadorIVA',''))=='5' and Decimal(str(raw.get('monto','0')))==0)
             }
+            non_monetary_indices = set(non_monetary_line_indices(source))
+            sign_errors = []
             for index, raw in enumerate(source['lineas']):
-                if raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0:
-                    proposals.append({'index':index,'options':[],'rule':None,'reason':'Entrega gratuita sin importe: queda registrada en el XML y no requiere artículo.','confidence':1})
+                if index in non_monetary_indices:
+                    reason = ('Entrega gratuita' if raw['indicadorIVA']=='5' else 'Línea de importe cero')
+                    proposals.append({'index':index,'options':[],'rule':None,'reason':reason+': se conserva en el XML, sin cargar un artículo de valor cero.','confidence':1})
+                    continue
+                if raw['indicadorIVA'] in {'1','2','3'} and (Decimal(raw['monto']) < 0 or Decimal(raw['cantidad']) <= 0):
+                    sign_errors.append((index, raw))
+                    proposals.append({'index':index,'options':[],'rule':None,'reason':'Importe negativo o cantidad no positiva: requiere revisión contable en Zeta.','confidence':0})
                     continue
                 if raw['indicadorIVA'] not in {'1','2','3','6','7'}:
                     proposals.append({'index':index,'options':[],'rule':None,'reason':'Indicador fiscal especial: no es una tasa de IVA.','confidence':0})
@@ -472,9 +479,14 @@ class Store:
                 state='manual'
                 reasons=['El XML contiene '+', '.join(names.get(code,'indicador fiscal '+code) for code in sorted(special_indicators))+
                          '. No equivale a IVA 0%, 10% ni 22%. Requiere tratamiento específico en Zeta; no modificar el XML.']
-            elif not lines and state not in {'existing','loaded'} and all(raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0 for raw in source['lineas']):
+            elif sign_errors and state not in {'existing','loaded'}:
                 state='manual'
-                reasons=['Comprobante compuesto solo por entregas gratuitas de importe cero. Revisar en Zeta sin inventar una compra con importe.']
+                reasons=['La línea '+str(index+1)+' ('+raw['descripcion']+') tiene importe '+str(raw['monto'])+
+                         ' y cantidad '+str(raw['cantidad'])+'. Los descuentos/importes negativos y las cantidades no positivas requieren revisar el documento en Zeta. No se omiten automáticamente.'
+                         for index,raw in sign_errors]
+            elif not lines and state not in {'existing','loaded'} and source['lineas'] and len(non_monetary_indices)==len(source['lineas']):
+                state='manual'
+                reasons=['El comprobante solo contiene líneas de importe cero. No se creará una factura vacía en Zeta.']
             if source['tipo'] in {'181','182','183'}:
                 state, reasons = 'non_invoice', []
             elif state not in {'existing','loaded'} and (source['tipo']!='111' or source.get('ajustesGlobales')):
@@ -483,7 +495,7 @@ class Store:
                 reasons=[('La factura contiene descuentos o recargos globales.' if source.get('ajustesGlobales') else kind+'.')+' Completar en Zeta: este caso todavía no tiene carga automática. No bloquea las otras facturas.']
             if decision.get('skip') or source['rut'] in settings.get('excluded_suppliers:'+company,{}):
                 state, reasons = 'skipped', []
-            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'reasons': reasons, 'suggested_center':center if 'center' not in decision and source['rut'] in learned_centers else '', 'non_monetary_lines':[idx for idx,raw in enumerate(source['lineas']) if raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0], 'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
+            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'reasons': reasons, 'suggested_center':center if 'center' not in decision and source['rut'] in learned_centers else '', 'non_monetary_lines':sorted(non_monetary_indices), 'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
             with self.connect() as db:
                 for proposal in proposals:
                     db.execute('INSERT OR REPLACE INTO proposals VALUES(?,?,?,?)',(company,record['key'],proposal['index'],json.dumps(dict(proposal,generated=now()))))
