@@ -1,4 +1,4 @@
-﻿"""Recorre todos los CFE; carga únicamente ausencias verificadas y formularios validados."""
+"""Recorre todos los CFE; carga únicamente ausencias verificadas y formularios validados."""
 
 from runtime_paths import DATA_DIR, CODE_DIR, APP_DIR, APP_URL, company_rut, control_value, category_provider_rut
 import argparse
@@ -15,7 +15,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 from conciliar import BASE,one_file,already_registered,invoice_issues,read_excel,match_zeta
 from revisar_lote import source_index
-from xml_source import preview_net_lines,ignored_line_indices,non_monetary_line_indices
+from xml_source import preview_net_lines,ignored_line_indices,non_monetary_line_indices,rounding_line_indices
 from chrome_connection import connect_chrome,choose_page
 from zeta_compras import LIST,refresh_list,prepare_header,select_supplier_exact,set_control,localized,money,unit_price,input_price,adapt_zeta_rounding,read_totals,confirm_once,SupplierApprovalRequired,validate_supplier_catalog,finish_cash_payment
 from zeta_ui_runtime import wait_path,wait_value,select_article,prompt_frame,open_prompt,click_readonly,select_prompt_result
@@ -27,7 +27,10 @@ REPORT=BASE/'salida/lote/carga.json'
 PROFILES={'Compra Crédito':{'code':'21','destination':'article','editor':'lineacompras'},
           'Compra Crédito Gastos':{'code':'26','destination':'concept','editor':'lineagastos'},
           'Compra Contado':{'code':'23','destination':'article','editor':'lineacompras'},
-          'Compra Contado Gastos':{'code':'28','destination':'concept','editor':'lineagastos'}}
+          'Compra Contado Gastos':{'code':'28','destination':'concept','editor':'lineagastos'},
+          # Zeta's conventional codes; the live form checks the type and label before any write.
+          'Nota de Crédito Compra':{'code':'22','destination':'article','editor':'lineacompras','credit_note':True},
+          'Nota de Crédito Compra Gastos':{'code':'27','destination':'concept','editor':'lineagastos','credit_note':True}}
 ROUNDING_TOLERANCE=Decimal('1.00')
 
 
@@ -171,12 +174,14 @@ def plan_for(invoice,source):
     # El centro vacío es una elección válida; nunca se reemplaza por un área.
     invoice=deepcopy(invoice)
     invoice.setdefault('zeta',{})['centroCosto']=invoice.get('zeta',{}).get('centroCosto') or ''
-    ignored=set(ignored_line_indices(source,invoice))|set(non_monetary_line_indices(source))
+    ignored=set(ignored_line_indices(source,invoice))|set(non_monetary_line_indices(source))|set(rounding_line_indices(source,ROUNDING_TOLERANCE))
     unsupported=[line for index,line in enumerate(source.get('lineas',[])) if index not in ignored and str(line.get('indicadorIVA','')) not in {'1','2','3'}]
     if unsupported:
         line=unsupported[0]
         raise ValueError('La línea XML «'+line.get('descripcion','')+'» tiene indicador '+str(line.get('indicadorIVA',''))+
             ' sin plan validado. Requiere corregir el bot; no se resuelve cambiando el formulario, el artículo ni el IVA del XML.')
+    if str(invoice.get('cfe',{}).get('tipo')) == '112' and invoice['zeta']['comprobante'].startswith('Devolución Compra'):
+        raise ValueError('Devolución contado: falta verificar el circuito de reintegro a caja en Zeta. No se guarda para evitar pagos con signo incorrecto.')
     issues=invoice_issues(invoice)
     if issues:raise ValueError('; '.join(issues))
     profile=PROFILES.get(invoice['zeta']['comprobante'])
@@ -190,6 +195,8 @@ def plan_for(invoice,source):
         rate=Decimal(source.get('tipoCambio') or '0')
         if not rate.is_finite() or rate<=0:raise ValueError('El XML en USD no incluye una cotizacion positiva.')
         invoice['cfe']['tipoCambio']=str(rate)
+    if bool(profile.get('credit_note')) != (str(invoice['cfe']['tipo']) == '112'):
+        raise ValueError('Tipo fiscal XML y tipo de operación Zeta incompatibles.')
     if any(l['tipoDestino']!=profile['destination'] for l in invoice['lineas']):
         raise ValueError('Destino contable distinto del formulario específico.')
     plan=preview_net_lines(source,invoice,company_rut(),rounding_tolerance=ROUNDING_TOLERANCE)
@@ -404,7 +411,7 @@ def run(save=False,interactive=False,payload=None,progress=None,cancelled=None,d
                             item.update(estado='DOCUMENTO_NO_COMPRA',motivo='El XML es un remito o resguardo; no corresponde cargarlo como factura de compra.');continue
                         if not invoice['proveedor'].get('codigoZeta'):
                             item.update(estado='BLOQUEADO_IDENTIDAD',motivo='Elegí el proveedor para poder buscar esta factura en Zeta.');continue
-                        if duplicates_only and str(invoice['cfe']['tipo'])!='111':
+                        if duplicates_only and str(invoice['cfe']['tipo']) not in {'111','112'}:
                             item.update(estado='BLOQUEADO_TIPO',motivo='Este tipo fiscal requiere una búsqueda específica. Se conserva visible para verificarlo.');continue
                         absent,proof=absence(page,invoice);item['consultas_zeta']=proof
                         pending_state=incomplete_operation(key)
@@ -426,7 +433,11 @@ def run(save=False,interactive=False,payload=None,progress=None,cancelled=None,d
                                 item.update(estado='BLOQUEADO_INCIERTO',guardado_parcial=True,
                                     docid=(pending_state or {}).get('docid') or exact[0].get('docid',''),
                                     motivo='Existe un registro de una carga interrumpida; puede estar incompleto. No se anuncia como cargado ni se repite el guardado.');continue
-                            item['estado']='RESULTADOS_EN_ZETA_NO_CARGAR' if exact else 'BLOQUEADO_COINCIDENCIAS'
+                            if str(invoice['cfe']['tipo']) == '112':
+                                item['estado']='BLOQUEADO_COINCIDENCIAS'
+                                item['motivo']='Hay un comprobante del proveedor con la misma serie y número. Confirmar que sea la nota de crédito, no una compra, antes de considerarla cargada.'
+                            else:
+                                item['estado']='RESULTADOS_EN_ZETA_NO_CARGAR' if exact else 'BLOQUEADO_COINCIDENCIAS'
                             if not exact:item['motivo']='La búsqueda devuelve registros que no identifican unívocamente este emisor, serie y número; revisar antes de cargar.'
                             continue
                         if duplicates_only:

@@ -215,6 +215,12 @@ class SupplierApprovalRequired(RuntimeError):
 
 def validate_supplier_catalog(supplier, actual, approvals):
     if actual['codigoZeta']!=supplier['codigoZeta']:raise RuntimeError('Código del proveedor diferente del correlacionado.')
+    if supplier.get('generico') is True:
+        # Solo el proveedor genérico elegido manualmente para esta factura.
+        # El RUT del CFE permanece intacto; no guardar una relación global.
+        if not ('genérico' in actual.get('nombre', '').casefold() or 'generico' in actual.get('nombre', '').casefold()):
+            raise RuntimeError('El código ya no identifica al proveedor genérico en Zeta.')
+        return
     if actual['rut']:
         if actual['rut']!=supplier['rut']:raise RuntimeError('RUT del proveedor contradictorio: no se carga.')
     else:
@@ -264,22 +270,40 @@ def select_supplier_exact(page, supplier, *, confirm_supplier=None):
 
 
 def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=None):
-    codes={'Compra Crédito':'21','Compra Crédito Gastos':'26','Compra Contado':'23','Compra Contado Gastos':'28'}
+    codes={'Compra Crédito':'21','Compra Crédito Gastos':'26','Compra Contado':'23','Compra Contado Gastos':'28',
+           'Nota de Crédito Compra':'22','Nota de Crédito Compra Gastos':'27'}
     if form not in codes or invoice['zeta']['comprobante']!=form:
         raise RuntimeError('Formulario fuera de los tipos capturados.')
     click_readonly(page.locator('#DDO_AGAGREGARContainer_btnGroupDrop'))
-    menu_form='Compra Contado' if form.startswith('Compra Contado') else 'Compra Crédito'
-    links=page.locator('a').filter(has_text=menu_form)
-    matches=[links.nth(i) for i in range(links.count()) if links.nth(i).inner_text().strip()==menu_form
+    note=form.startswith('Nota de Crédito Compra')
+    menu_form=('Nota de Crédito' if note else ('Compra Contado' if form.startswith('Compra Contado') else 'Compra Crédito'))
+    links=(page.locator('a[href^="z.gestion.comprobantes.facturaproveedor?"]') if note
+           else page.locator('a').filter(has_text=menu_form))
+    def match_menu(title):
+        text=title.strip().lower().replace('é','e').replace('á','a')
+        return (('nota' in text and 'credito' in text) or 'n/c' in text) if note else text==menu_form.lower()
+    matches=[links.nth(i) for i in range(links.count()) if match_menu(links.nth(i).inner_text())
              and (links.nth(i).get_attribute('href') or '').startswith('z.gestion.comprobantes.facturaproveedor?')]
     if len(matches)!=1: raise RuntimeError('Enlace de alta ambiguo: '+form)
     href=matches[0].get_attribute('href')
     page.goto('https://www.zetasoftware.com/'+href,wait_until='load')
     wait_path(page,'/z.gestion.comprobantes.facturaproveedor')
+    if note:
+        # 22/27 come from the purchase-document families. Validate that Zeta's live
+        # labels actually identify a *purchase credit note*, not an ordinary bill.
+        choices=page.locator('#CMPIDDOC option').evaluate_all('options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))')
+        matched=[v for v in choices if v['value']==codes[form]]
+        if len(matched)!=1:
+            raise RuntimeError('La nota de crédito no existe en el selector de Zeta.')
+        label=matched[0]['text'].lower().replace('é','e').replace('á','a')
+        expected_kind='gasto' if form.endswith(' Gastos') else None
+        if ('n/c' not in label and not ('nota' in label and 'credito' in label)) or (expected_kind and expected_kind not in label):
+            raise RuntimeError('El código de nota de crédito no corresponde a la descripción real de Zeta.')
     if page.locator('#CMPIDDOC').input_value()!=codes[form]:
         options=page.locator('#CMPIDDOC option').evaluate_all('options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))')
         labels={'21':'21-C.Crédito','26':'26-Créd.Gasto','23':'23-C.Contado','28':'28-Cont.Gasto'}
-        if not any(o=={'value':codes[form],'text':labels[codes[form]]} for o in options):raise RuntimeError('Tipo diferente del catálogo capturado.')
+        if not note and not any(o=={'value':codes[form],'text':labels[codes[form]]} for o in options):
+            raise RuntimeError('Tipo diferente del catálogo capturado.')
         page.locator('#CMPIDDOC').select_option(value=codes[form])
         page.locator('#CMPIDDOC').press('Tab')
         wait_value(lambda:page.evaluate('!gx.evt.processing && !gx.spa.isNavigating()'),bool,'El formulario de gastos sigue cambiando.')

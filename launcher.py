@@ -6,13 +6,15 @@ import mimetypes
 import os
 import sys
 from urllib.parse import urlsplit,unquote
-import webbrowser
+import shutil
+import subprocess
+import time
 import base64
 import secrets
 import threading
 
 sys.path.insert(0,str(Path(__file__).resolve().parent/'src/backend'))
-from runtime_paths import APP_DIR,DATA_DIR,APP_URL,initialize
+from runtime_paths import APP_DIR,DATA_DIR,APP_URL,PREFERENCES,initialize
 from workspace_store import Store
 from workspace_jobs import Jobs
 
@@ -107,13 +109,71 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header('Cache-Control','no-cache');super().end_headers()
     def log_message(self,*args):pass
 
+def find_window_browser():
+    """Usar Edge o Chrome; una pestaña normal no permite detectar un cierre fiable."""
+    candidates=[]
+    for name in ('msedge.exe', 'chrome.exe', 'microsoft-edge', 'google-chrome', 'chromium'):
+        executable=shutil.which(name)
+        if executable:candidates.append(Path(executable))
+    program_roots=[os.environ.get('PROGRAMFILES'),os.environ.get('PROGRAMFILES(X86)'),
+                   os.environ.get('LOCALAPPDATA')]
+    for root in filter(None,program_roots):
+        candidates.extend([Path(root)/'Microsoft/Edge/Application/msedge.exe',
+                           Path(root)/'Google/Chrome/Application/chrome.exe'])
+    for candidate in candidates:
+        if candidate.is_file():return candidate
+    raise RuntimeError('No se encontró Microsoft Edge ni Google Chrome. Cerecito necesita uno de ellos para abrir su propia ventana y cerrarse junto con ella.')
+
+
+def open_cerecito_window(url):
+    """Proceso de navegador exclusivo; no comparte perfil con Chrome del bot de Zeta."""
+    browser=find_window_browser()
+    profile=PREFERENCES.parent/'perfil_ventana'/browser.stem.lower()
+    profile.mkdir(parents=True,exist_ok=True)
+    args=[str(browser), '--app='+url, '--user-data-dir='+str(profile),
+          '--no-first-run', '--no-default-browser-check',
+          '--disable-background-mode', '--disable-extensions']
+    return subprocess.Popen(args,stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+
+
+def cancel_pending_jobs_before_exit():
+    """Al cerrar la ventana, no abortar un guardado en curso a mitad de factura."""
+    if SERVICE is None or JOB_SERVICE is None:return
+    try:
+        with SERVICE.connect() as db:
+            active=[row['id'] for row in db.execute(
+                "SELECT id FROM jobs WHERE status IN ('queued','running','cancelling')")]
+    except Exception:
+        return
+    for job in active:
+        JOB_SERVICE.cancel(job)  # El motor interrumpe antes de la próxima factura.
+    while active:
+        time.sleep(0.25)
+        try:
+            with SERVICE.connect() as db:
+                active=[row['id'] for row in db.execute(
+                    "SELECT id FROM jobs WHERE status IN ('queued','running','cancelling')")]
+        except Exception:
+            break
+
+
 def main():
     initialize()
     services()
     port=int(os.environ.get('CERECITO_UI_PORT','8765'))
     server=ThreadingHTTPServer(('127.0.0.1',port),Handler)
-    webbrowser.open(APP_URL)
-    server.serve_forever()
+    server.daemon_threads=True
+    server_thread=threading.Thread(target=server.serve_forever,daemon=True)
+    server_thread.start()
+    try:
+        window=open_cerecito_window(APP_URL)
+        window.wait()  # La X de la ventana cierra el navegador exclusivo.
+    finally:
+        cancel_pending_jobs_before_exit()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
 
 if __name__=='__main__':
     try:main()

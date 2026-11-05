@@ -3,6 +3,9 @@ lineHTML=function(i,l,n){
   const choice=i.decision.lines?.[n]||i.proposals[n]?.rule;
   const chosen=state.catalog.find(c=>c.kind===choice?.kind&&c.code===choice?.code);
   const tax={'1':'Exento','2':'10%','3':'22%','5':'Entrega gratuita (sin IVA)','6':'No facturable','7':'No facturable','11':'Impuesto percibido','12':'IVA en suspenso'}[l.indicadorIVA]||'Indicador fiscal '+l.indicadorIVA;
+  if(i.auto_rounding_lines?.includes(n)){
+    return `<div class="invoice-row ignored"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>Redondeo omitido por defecto; se conserva en el XML y se controla contra el total.</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>No requiere destino</small></div></div>`;
+  }
   if(l.indicadorIVA==='5' && Number(l.monto)===0){
     return `<div class="invoice-row"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>Entrega gratuita de importe cero; conservada en el XML, no se carga como compra</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>No requiere destino</small></div></div>`;
   }
@@ -34,6 +37,12 @@ function invoiceLayout(invoice,panel){
   mapping.before(settings);settings.append(mapping);
   const note=panel.querySelector(':scope > .muted');if(note)note.remove();
   head.append(panel);
+  if(invoice.source.tipo==='112'){
+    const refs=(invoice.source.referencias||[]).map(r=>r.global==='1'?`Referencia global: ${r.motivo||'sin motivo'}`:`CFE ${r.tipo||'?'} · ${r.serie||'?'} / ${r.numero||'?'}`);
+    const note=document.createElement('p');note.className='muted';
+    note.textContent='Nota de crédito (importe fiscal positivo; en Zeta se carga como devolución). '+(refs.length?refs.join(' · '):'Sin referencia fiscal identificada.');
+    head.append(note);
+  }
   function compactMapping(){
     const apply=$('applySector');
     if(apply){apply.textContent='Aplicar a la factura';apply.setAttribute('aria-label','Aplicar sector a toda la factura');panel.append(apply);}
@@ -63,12 +72,17 @@ function invoiceLayout(invoice,panel){
     $('kind'+n).value=$('destinationKind').value;
     renderChoices(invoice,n,$('search'+n).value,$('destinationKind').value);
   }
-  if(!invoice.payload.proveedor.codigoZeta||invoice.reasons.some(r=>/proveedor/i.test(r)))supplierSearch();
+  if(!invoice.payload.proveedor.codigoZeta||invoice.payload.proveedor.generico||invoice.reasons.some(r=>/proveedor/i.test(r)))supplierSearch();
   else {
     $('supplier').closest('label').hidden=true;
     const provider=document.createElement('p');provider.className='muted';
     provider.textContent='Proveedor: '+$('supplier').selectedOptions[0].textContent;
     fields.append(provider);
+  }
+  if(invoice.payload.proveedor.generico){
+    const note=document.createElement('p');note.className='muted';
+    note.textContent='Proveedor genérico para este comprobante: el RUT original del XML se conserva y esta asociación no se aprende para otras facturas.';
+    fields.append(note);
   }
   const excluded=state.settings['excluded_suppliers:'+state.settings.company.rut]||{};
   const skipSupplier=document.createElement('button');skipSupplier.type='button';

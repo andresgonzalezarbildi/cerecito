@@ -76,6 +76,15 @@ def parse_xml(content, filename=''):
                       'descripcion':value(item,'NomItem',''), 'indicadorIVA':value(item,'IndFact'),
                       'monto':str(decimal_value(value(item,'MontoItem'))),
                       'cantidad':str(decimal_value(value(item,'Cantidad','1')))})
+    references = []
+    for ref in nodes[0].findall('.//{*}Referencia'):
+        references.append({
+            'tipo': value(ref, 'TpoDocRef', ''),
+            'serie': value(ref, 'Serie', ''),
+            'numero': value(ref, 'NroDocRef', ''),
+            'global': value(ref, 'IndGlobal', ''),
+            'motivo': value(ref, 'RazonRef', ''),
+        })
     return {'clave':'|'.join((rut,kind,series,str(int(number)))), 'archivo':filename,
             'sha256CFE':hashlib.sha256(ET.canonicalize(ET.tostring(nodes[0],encoding='unicode'),strip_text=True,rewrite_prefixes=True).encode('utf-8')).hexdigest(),
             'sha256XML':hashlib.sha256(content).hexdigest(),'rut':rut,'receptor':target_rut,
@@ -83,7 +92,7 @@ def parse_xml(content, filename=''):
             'fecha':value(ident,'FchEmis'),'moneda':value(totals,'TpoMoneda','') if kind=='181' else value(totals,'TpoMoneda'),
             'tipoCambio':value(totals,'TpoCambio',''),'mntBruto':value(ident,'MntBruto','0'),'formaPagoXML':value(ident,'FmaPago',''),
             'ajustesGlobales':bool(nodes[0].findall('.//{*}DscRcgGlobal')),
-            'totales':fiscal,'lineas':items,
+            'totales':fiscal,'lineas':items,'referencias':references,
             'retencionesXML':ET.tostring(nodes[0],encoding='unicode') if kind in {'181','182','183'} else None,
             'alcance':'Identidad y consistencia fiscal; no verifica firma digital ni aceptación por DGI.'}
 
@@ -145,15 +154,43 @@ def ignored_line_indices(source, invoice):
     return indices
 
 
-def non_monetary_line_indices(source):
-    """Líneas sin valor contable: regalos (5) o ítems 1/2/3 de monto cero.
+def valid_credit_note_reference(references):
+    """No suponer una factura original cuando el CFE no la identifica."""
+    for ref in references:
+        number=str(ref.get('numero','')).strip()
+        if (str(ref.get('global',''))=='1' and str(ref.get('motivo','')).strip()):
+            return True
+        if (str(ref.get('tipo','')).strip() and str(ref.get('serie','')).strip()
+                and number.isdigit() and int(number)>0):
+            return True
+    return False
 
-    Sólo se omiten si los totales XML siguen cuadrando. Un descuento o ajuste
-    negativo no es una línea de cero y nunca se descarta automáticamente.
+
+def non_monetary_line_indices(source):
+    """CFE IndFact=5: entrega gratuita sin importe, no un IVA del 5%."""
+    return [i for i,line in enumerate(source['lineas'])
+            if str(line.get('indicadorIVA',''))=='5' and decimal_value(line.get('monto','0'))==0]
+
+
+def rounding_line_indices(source, tolerance=Decimal('1.00')):
+    """Omitir solo ajustes de redondeo identificables y de importe pequeño.
+
+    Se conserva siempre la línea en el XML. El total del documento debe cuadrar
+    dentro de la tolerancia configurada; no se omiten descuentos ordinarios.
     """
-    return [i for i, line in enumerate(source['lineas'])
-            if str(line.get('indicadorIVA','')) in {'1', '2', '3', '5'}
-            and decimal_value(line.get('monto', '0')) == 0]
+    limit = min(decimal_value(tolerance), Decimal('1.00'))
+    if not limit.is_finite() or limit <= 0:
+        return []
+    result = []
+    for index, line in enumerate(source.get('lineas', [])):
+        description = str(line.get('descripcion', '')).strip().casefold()
+        is_rounding = re.match(r'^(?:redondeo\b|(?:ajuste|diferencia)\s+(?:(?:de|por)\s+)?redondeo\b)', description)
+        if not is_rounding or str(line.get('indicadorIVA', '')) not in {'1','2','3','6','7'}:
+            continue
+        amount = decimal_value(line.get('monto', '0'))
+        if amount.is_finite() and Decimal('0') < abs(amount) <= limit:
+            result.append(index)
+    return result
 
 
 def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Decimal('0')):
@@ -165,8 +202,11 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     """
     if source['receptor'] != expected_receiver:
         raise SourceError('El receptor del XML no es la empresa de Zeta.')
-    if source['tipo'] != '111':
-        raise SourceError('Este comprobante requiere carga manual en Zeta; no es una factura de compra tipo 111.')
+    if source['tipo'] not in {'111', '112'}:
+        raise SourceError('Tipo CFE sin plan de compras validado: '+source['tipo'])
+    is_credit_note = source['tipo'] == '112'
+    if is_credit_note and cents(source['totales']['total']) <= 0:
+        raise SourceError('Nota de crédito sin monto fiscal positivo; requiere revisión antes de cargar.')
     if source.get('ajustesGlobales'):
         raise SourceError('Completar en Zeta los descuentos o recargos globales para conservar el total del comprobante.')
     if invoice.get('proveedor',{}).get('rut') != source['rut']:
@@ -187,9 +227,9 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     if source['mntBruto'] not in {'0','1'}:
         raise SourceError('Indicador de montos brutos aún no soportado.')
     no_monetarias=non_monetary_line_indices(source)
-    assigned=list(ignored_line_indices(source,invoice))+no_monetarias
-    if len(set(assigned)) != len(assigned):
-        raise SourceError('Una línea sin importe no puede ignorarse dos veces.')
+    manual_ignored=ignored_line_indices(source,invoice)
+    auto_rounding=[i for i in rounding_line_indices(source,rounding_tolerance) if i not in manual_ignored]
+    assigned=list(manual_ignored)+no_monetarias+auto_rounding
     result=[]
     bases={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
     taxes={'1':Decimal(0),'2':Decimal(0),'3':Decimal(0)}
@@ -213,13 +253,8 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
             raise SourceError('El importe original de Cerecito difiere del XML.')
         rate={'1':Decimal('0'),'2':Decimal('0.10'),'3':Decimal('0.22')}[indicator]
         original=decimal_value(raw['monto'])
-        if original < 0:
-            raise SourceError('Línea '+str(index+1)+' con importe negativo ('+str(original)+
-                              '): requiere revisar el descuento/ajuste en Zeta; no se puede omitir ni convertir a cero.')
-        if original == 0:
-            raise SourceError('La línea '+str(index+1)+' tiene importe cero y no debe cargarse en Zeta.')
-        if decimal_value(raw['cantidad']) <= 0:
-            raise SourceError('Línea '+str(index+1)+' con importe positivo y cantidad nula/negativa; revisar el XML.')
+        if original <= 0 or decimal_value(raw['cantidad']) <= 0:
+            raise SourceError('Línea nula/negativa sin flujo específico validado.')
         net=(original/(1+rate) if source['mntBruto']=='1' else original).quantize(PRECISION,rounding=ROUND_HALF_UP)
         base=cents(net)
         tax=cents(net*rate)
@@ -244,9 +279,13 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     if total_difference:differences['total']=str(total_difference)
     if bases['1']!=exempt_total:differences['exento']=str(bases['1']-exempt_total)
     return {'clave':source['clave'],'sha256XML':source['sha256XML'],'mntBruto':source['mntBruto'],
+            'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra',
+            'signoContable':-1 if is_credit_note else 1,
+            'referencias':source.get('referencias', []),
             'diferenciasAceptadas':differences,'toleranciaRedondeo':str(rounding_tolerance),
             'lineasIgnoradas':invoice.get('lineasIgnoradas',[]),
             'lineasNoMonetarias':no_monetarias,
+            'lineasRedondeo':auto_rounding,
             'totalesXML':{'neto':str(sum((cents(source['totales'].get(k,'0')) for k in ('netoMin','netoBas','noGravado','exento')),Decimal(0))),
                           'iva':str(cents(source['totales']['ivaMin'])+cents(source['totales']['ivaBas'])),
                           'total':source['totales']['total']},

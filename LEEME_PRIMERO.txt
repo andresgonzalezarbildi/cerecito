@@ -1,0 +1,46 @@
+CERECITO - ACTUALIZACIÓN ACUMULATIVA + CIERRE DE VENTANA (04/11/2026)
+
+Este ZIP contiene todos los cambios de las tres actualizaciones anteriores,
+y dos archivos auxiliares necesarios para completar la instalación base.
+No hace falta instalar esos ZIP por separado.
+
+INSTALACIÓN
+1. Cerrá Cerecito y el Chrome usado por el bot.
+2. Abrí la carpeta de Cerecito (donde está ABRIR_CERECITO.bat).
+3. Extraé el contenido de este ZIP DIRECTAMENTE en esa carpeta.
+   Deben quedar allí los archivos ACTUALIZAR_CERECITO.bat,
+   actualizar_cerecito_completo.py y la carpeta ARCHIVOS_ACTUALIZADOS.
+4. Ejecutá ACTUALIZAR_CERECITO.bat y comprobá que diga LISTO.
+5. Abrí Cerecito normalmente con ABRIR_CERECITO.bat.
+
+QUÉ CAMBIA
+- IVA: se respetan los indicadores fiscales del CFE; no se confunden 5 o 12 con tasas.
+- Aprendizaje local: persisten las decisiones manuales de artículos, conceptos y sectores.
+- Proveedor genérico: se permite al elegirlo manualmente para esa factura, aun con RUT distinto,
+  sin aprender una relación general entre RUT y proveedor.
+- Redondeos pequeños identificables: se omiten por defecto sin borrar el XML,
+  sujetos a la tolerancia configurada y conciliación del total.
+- Notas de crédito: soporte del CFE 112 a crédito para Nota de Crédito Compra y Gastos,
+  con validaciones de referencia, IVA, totales, identidad y duplicados.
+- Notas de crédito contado: siguen retenidas para revisión manual hasta validar el reintegro.
+- Ventana dedicada: abre Cerecito como aplicación en Microsoft Edge (o Chrome),
+  sin mezclarse con el perfil del bot. Al cerrar esa ventana se cierra Python.
+  Si hay un trabajo en curso, se cancela el resto del lote tras la factura activa.
+  Requiere Microsoft Edge o Google Chrome instalado en Windows.
+
+SEGURIDAD
+El instalador crea una copia de los archivos modificados en
+RESPALDO_ANTES_DE_ACTUALIZAR/<fecha_y_hora>/, antes de reemplazarlos.
+No cambia la base SQLite ni los datos de facturas, los XML, el catálogo o la configuración.
+No abre el navegador ni ejecuta cargas en Zeta al instalar.
+
+IMPORTANTE
+La carga de notas de crédito se validó con pruebas simuladas, no todavía con una nota real
+contra Zeta. Hacé una primera prueba controlada y verificá signo, saldo del proveedor y
+referencia a la factura original. La vinculación automática a esa factura no está verificada.
+
+Pruebas del código acumulado: 88 pruebas ejecutadas, 1 omitida (navegador).
+El cierre de la ventana fue probado con simulación de procesos; falta comprobar
+el comportamiento de Edge/Chrome en la instalación real de Windows.
+Para ejecutar las pruebas (opcional):
+  .venv\Scripts\python.exe -m unittest discover -s tests -q

@@ -10,6 +10,7 @@ La falta de datos en un reporte de Zeta nunca se interpreta como factura nueva.
 from __future__ import annotations
 
 from runtime_paths import DATA_DIR, CODE_DIR, APP_DIR, APP_URL, company_rut, control_value, category_provider_rut
+from xml_source import valid_credit_note_reference
 
 import argparse
 import csv
@@ -317,7 +318,12 @@ def invoice_issues(inv):
     if any(ln.get("mezclaIVA") for ln in lines):
         warnings.append("Agrupación de líneas con distintos indicadores de IVA")
     if str(c.get("tipo", "")) in {"112", "122"}:
-        warnings.append("Nota de crédito: requiere verificación de signo y referencia")
+        expected_form = str(inv.get('zeta', {}).get('comprobante', ''))
+        if not (str(c.get('tipo')) == '112'
+                and inv.get('tipoOperacion') == 'nota_credito_compra'
+                and expected_form in {'Nota de Crédito Compra', 'Nota de Crédito Compra Gastos'}
+                and valid_credit_note_reference(inv.get('referencias', []))):
+            warnings.append('Nota de crédito sin tipo de devolución validado o sin referencia fiscal; revisar signo y referencia')
     # No inferimos IVA final desde IndFact: el control contra total se hará en Zeta.
     if c.get("total") is None:
         warnings.append("XML sin total")
