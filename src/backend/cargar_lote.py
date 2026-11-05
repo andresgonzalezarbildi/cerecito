@@ -108,9 +108,19 @@ def reconcile_absent_attempt(page, invoice, source, previous, expected_company):
     return event
 
 
-def recover_list(page,expected_company):
+def recover_list(page,expected_company,*,allow_company_id=False):
     # Solo navegación/consulta. Nunca reintentar la factura que falló.
     page.goto(LIST,wait_until='load');wait_path(page,'/z.gestion.comprobantes.compras')
+    if allow_company_id:
+        try:
+            active_id=company_id(page)
+        except Exception:
+            # Algunos listados no exponen el ID: volver al control completo.
+            pass
+        else:
+            if active_id!=expected_company['id']:
+                raise ValueError('La empresa activa cambió durante el lote.')
+            return {**expected_company,'recuperada_por':'id_empresa','fecha_recuperacion':stamp()}
     control=refresh_list(page,'01/01/26',date.today().strftime('%d/%m/%y'),control_value('numero'))
     proof=verify_company(page,control)
     if proof['id']!=expected_company['id'] or proof['rut']!=expected_company['rut']:
@@ -499,7 +509,7 @@ def run(save=False,interactive=False,payload=None,progress=None,cancelled=None,d
                         if item['estado'] not in {'CONFIRMADO','INCIERTO','BLOQUEADO_PREPARACION','BLOQUEADO_CONFIRMACION_PROVEEDOR'}:
                             item.update(estado='BLOQUEADO_ERROR',motivo=str(error).splitlines()[0][:300])
                         try:
-                            item['recuperacion']=recover_list(page,report['empresa_verificada'])
+                            item['recuperacion']=recover_list(page,report['empresa_verificada'],allow_company_id=True)
                         except Exception as recovery_error:
                             raise RuntimeError('La conexión o empresa no permite continuar: '+str(recovery_error).splitlines()[0][:200]) from recovery_error
                     finally:
