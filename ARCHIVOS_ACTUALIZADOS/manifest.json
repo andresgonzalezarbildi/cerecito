@@ -1,19 +1,12 @@
 {
-  "version": "2026-11-04-acumulativa-cierre-ventana",
+  "version": "2026-11-09-finesa-iva-y-cargas-interrumpidas",
   "archivos": {
-    "launcher.py": "b7d55bdbe92c74590fa8e584c2c9af5b237a5365f85c37e519224d2d483034eb",
-    "src/backend/workspace_store.py": "754d03076e6fccb958cf9b8c5088501993202924961934228686e243a665b207",
-    "src/backend/xml_source.py": "8e618281363f6d90e175a3aa434073969faa33e94d3b8cc7d22d576583103516",
-    "src/backend/cargar_lote.py": "2e02188a93bda3437c0c3bd3430713e6adf4c9af5a9723017574d1cb0e80cdda",
-    "src/backend/conciliar.py": "a8574fb313198b16ecd13e41b05b4f10ac293bd2961a8c4eece1bf711ec9ee48",
-    "src/backend/zeta_compras.py": "d04ab28213a4e358537d0f166b4539920010bc0a37b38751ad91fe1bb0f3de8d",
-    "src/web/js/workflow.js": "7879208f91aa92a85b77a9ee807f9c0738abd6614225440e0c018f60d6c80277",
-    "src/web/js/invoice-layout.js": "5726fb04996e968ea032201e4863a00c664c35030ccd880cf0125655c1e93086",
-    "tests/test_workflow.py": "14f8f409f567fef60eb11119283ed06bb1d52b621cd3623e3411a2a4982b87f3",
-    "tests/test_hotfix_generico_redondeo.py": "998879c99fd568ccea0e37877414864b14be666eafcb503bdc9362d3547a6b1a",
-    "tests/test_notas_credito.py": "775bf2cb3087dbd011cfb205f472055054b800bb641d2b1bec1e2df80003963f",
-    "tests/test_ventana.py": "2cd3fd1c39475495aeb0f13015dd2c200661002f7dc58aae7c474fd0c833115b",
-    "migrar_datos.py": "9aefb214a9ff61906faaf7c2caaf0cb10c7b6c8a72e54beba62ac6f7fa737146",
-    "config/configuracion_zeta.example.json": "d601cfaf2eb3f871933ed580834be9e7fb489343ec3ce069c0b3ef55db28e7b3"
+    "src/backend/xml_source.py": "fbeab9b0a84504fcd117c9f66ba9756bc2cc419b445999137189405b4e7e3118",
+    "src/backend/workspace_store.py": "a64fa0e123bc694c756952a784e3da1953ca67c627fc8ea189f18892d09743cf",
+    "src/backend/cargar_lote.py": "fbaffcdc278381ca3c15292e4269f1e986c9f21d4f029ea449fc278a8d30d6ce",
+    "src/backend/zeta_bot.py": "f996f9a2e61df69063d7655d5614087e650e5471950a66e0ce410ac0fec83219",
+    "src/web/js/workflow.js": "45f06511caa7fac2ce28f351178df9ae77e708e941e90a148e2167f7a71201a6",
+    "src/web/js/invoice-layout.js": "76a0183ac3f794ea0f207c409e4800a8e24a8bbec9ad9c61100d202c8f8fa94b",
+    "tests/test_engine_boundaries.py": "e8eede84c4fdc89e4d1f35b417e048d6a5613de575d89df1386b422a5428b8c6"
   }
 }

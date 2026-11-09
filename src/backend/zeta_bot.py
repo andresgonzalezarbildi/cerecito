@@ -88,14 +88,14 @@ def append_ledger(path, record):
         os.fsync(f.fileno())
 
 
-def unresolved_attempts(path):
-    if not path.exists():
-        return set()
+def unresolved_attempts(*paths):
     last = {}
-    for line in path.read_text(encoding='utf-8').splitlines():
-        if line.strip():
-            event = json.loads(line)
-            last[event['clave']] = event['estado']
+    for path in paths:
+        if path.exists():
+            for line in path.read_text(encoding='utf-8-sig').splitlines():
+                if line.strip():
+                    event = json.loads(line)
+                    last[event['clave']] = event['estado']
     return {k for k, s in last.items() if s in {'INCIERTO', 'INICIANDO_GUARDADO', 'PREPARANDO', 'PREPARADA_SIN_GUARDAR'}}
 
 

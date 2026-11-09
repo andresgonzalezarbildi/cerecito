@@ -12,6 +12,18 @@ from pathlib import Path
 from xml_source import read_zip_documents, read_xml_documents, preview_net_lines, non_monetary_line_indices, rounding_line_indices, valid_credit_note_reference
 
 
+FINESA_RUT = '216450470015'
+
+
+def finesa_sector(address):
+    address = ' '.join(address.casefold().split())
+    if re.match(r'^lavadero\b', address):
+        return 'housekeeping'
+    if address == 'ruta interbalnearia km 115.5 (pde)':
+        return 'a&b'
+    return ''
+
+
 def now():
     return datetime.now(timezone.utc).isoformat()
 
@@ -206,9 +218,16 @@ class Store:
                 if source['receptor'] != company:
                     raise ValueError('El receptor del XML no coincide con la empresa.')
                 existing = db.execute('SELECT source FROM invoices WHERE company=? AND key=?', (company, source['clave'])).fetchone()
-                if existing and json.loads(existing['source'])['sha256CFE'] != source['sha256CFE']:
-                    raise ValueError('XML diferente con la misma identidad fiscal: ' + source['clave'])
-                db.execute('INSERT OR IGNORE INTO invoices(company,key,source) VALUES(?,?,?)', (company, source['clave'], json.dumps(source)))
+                if existing:
+                    previous = json.loads(existing['source'])
+                    if previous['sha256CFE'] != source['sha256CFE']:
+                        raise ValueError('XML diferente con la misma identidad fiscal: ' + source['clave'])
+                    if 'dirRecep' not in previous:
+                        previous['dirRecep'] = source['dirRecep']
+                        db.execute('UPDATE invoices SET source=? WHERE company=? AND key=?',
+                                   (json.dumps(previous), company, source['clave']))
+                else:
+                    db.execute('INSERT OR IGNORE INTO invoices(company,key,source) VALUES(?,?,?)', (company, source['clave'], json.dumps(source)))
                 for index, line in enumerate(source['lineas']):
                     db.execute('INSERT OR IGNORE INTO original_lines VALUES(?,?,?,?)', (company, source['clave'], index, json.dumps(line)))
             path.write_bytes(content)
@@ -281,19 +300,20 @@ class Store:
                     if isinstance(vat,str):vat=vat.split('|')
                     if raw['indicadorIVA'] not in vat:
                         raise ValueError('El destino no admite el IVA original de esta línea.')
-                    learned.append((company,source['rut'],raw['descripcion'].casefold().strip(),raw['indicadorIVA'],json.dumps({'kind':target['kind'],'code':target['code']})))
+                    if source['rut'] != FINESA_RUT:
+                        learned.append((company,source['rut'],raw['descripcion'].casefold().strip(),raw['indicadorIVA'],json.dumps({'kind':target['kind'],'code':target['code']})))
             if 'lines' in patch:
                 patch = dict(patch, lines={**decision.get('lines', {}), **patch['lines']})
             if 'center' in patch:
                 center=patch['center']
                 if not isinstance(center,str) or (center and not any(c['kind']=='center' and c['code']==center for c in self.catalog())):
                     raise ValueError('Sector inexistente en el catálogo.')
-                setting='supplier_centers:'+company
-                row_setting=db.execute('SELECT value FROM settings WHERE key=?',(setting,)).fetchone()
-                preferences=json.loads(row_setting['value']) if row_setting else {}
-                # Preferencia por RUT emisor, no por texto del nombre.
-                preferences[source['rut']]=center
-                db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(setting,json.dumps(preferences)))
+                if source['rut'] != FINESA_RUT:
+                    setting='supplier_centers:'+company
+                    row_setting=db.execute('SELECT value FROM settings WHERE key=?',(setting,)).fetchone()
+                    preferences=json.loads(row_setting['value']) if row_setting else {}
+                    preferences[source['rut']]=center
+                    db.execute('INSERT OR REPLACE INTO settings VALUES(?,?)',(setting,json.dumps(preferences)))
             decision.update(patch)
             if decision.get('mode') not in {None, 'credit', 'cash'}:
                 raise ValueError('Modalidad inválida.')
@@ -313,19 +333,34 @@ class Store:
             db.execute('INSERT OR REPLACE INTO rules VALUES(?,?,?,?,?)', (self.company(), invoice['source']['rut'], line['descripcion'].casefold().strip(), line['indicadorIVA'], json.dumps(choice)))
 
     def sectors(self):
-        catalog=self.catalog()
-        configured=self.settings().get('sectors:'+self.company(),{})
+        return self._sector_profiles(self.catalog(), self.settings().get('sectors:'+self.company(),{}))
+
+    @staticmethod
+    def _sector_profiles(catalog, configured):
         result=[{'code':'','name':'Sin sector / para distribuir','mapping':configured.get('',{}),'configured':'' in configured}]
         for center in (c for c in catalog if c['kind']=='center'):
             saved=configured.get(center['code'])
             mapping={}
             # Taxonomy suggests families, while the actual codes always come from masters.
-            name=center['name'].casefold()
-            family='alimentos' if name=='a&b' else ('material limpieza rooms' if 'housekeeping' in name else '')
-            if family:
-                for vat,pattern in [('1',r'exent'),('2',r'10\s*%'),('3',r'22\s*%')]:
-                    matches=[c for c in catalog if c['kind']=='article' and family in c['name'].casefold() and re.search(pattern,c['name'],re.I)]
-                    if len(matches)==1:mapping[vat]={'kind':'article','code':matches[0]['code']}
+            name=center['name'].strip().casefold()
+            families = []
+            if name == 'a&b':
+                families = [r'\balimentos\b']
+            elif 'housekeeping' in name:
+                families = [
+                    r'\bmat(?:erial(?:es)?)?\.?\s+(?:de\s+)?limpieza\s+rooms\b',
+                    r'^mat(?:erial(?:es)?)?\.?\s+(?:de\s+)?limpieza(?:\s+(?:iva\b|exent|\d|[(-]).*)?$',
+                ]
+            if saved is None and families:
+                for vat in ('1','2','3'):
+                    for family in families:
+                        matches = [c for c in catalog if c['kind']=='article'
+                                   and re.search(family,c['name'].strip(),re.I)
+                                   and vat in (c['vat'] if isinstance(c.get('vat'),list) else str(c.get('vat','')).split('|'))]
+                        if matches:
+                            if len(matches)==1:
+                                mapping[vat]={'kind':'article','code':matches[0]['code']}
+                            break
             result.append({'code':center['code'],'name':center['name'],'mapping':saved if saved is not None else mapping,'configured':saved is not None})
         return result
 
@@ -370,14 +405,16 @@ class Store:
             attempt_records=list(db.execute('SELECT a.key,a.data,a.created FROM attempts a JOIN jobs j ON j.id=a.job WHERE j.company=? ORDER BY a.id',(company,)))
             results={r['key']:dict(json.loads(r['data']),checked_at=r['created']) for r in attempt_records}
             positive_results={r['key']:dict(json.loads(r['data']),checked_at=r['created']) for r in attempt_records if json.loads(r['data']).get('estado') in {'CONFIRMADO','RESULTADOS_EN_ZETA_NO_CARGAR'}}
-        keys = settings.get('batch', {}).get('keys', [])
+        batch = settings.get('batch', {})
+        keys = set(batch.get('keys', []))
         learned_centers=settings.get('supplier_centers:'+company,{})
+        sector_profiles = self._sector_profiles(catalog, settings.get('sectors:'+company,{}))
+        profiles_by_code = {s['code']:s for s in sector_profiles}
         result = []
         for record in records:
             if record['key'] not in keys:
                 continue
             source, decision = json.loads(record['source']), json.loads(record['decision'])
-            batch=settings.get('batch',{})
             # La revisión nueva exige volver a comprobar duplicados, pero no descarta
             # decisiones y correlaciones aprendidas localmente.
             rules_for_invoice=rules
@@ -394,6 +431,27 @@ class Store:
                      or 'generico' in selected_supplier['name'].casefold())
             )
             reasons, proposals, lines = [], [], []
+            is_finesa = source['rut'] == FINESA_RUT and source['tipo'] in {'111','112'}
+            center = decision.get('center', learned_centers.get(source['rut'],''))
+            sector_mapping = {}
+            if is_finesa:
+                # A previous Finesa invoice's sector does not identify this delivery.
+                center = decision.get('center','')
+                if 'center' not in decision:
+                    sector_name = finesa_sector(source.get('dirRecep',''))
+                    matching = [s for s in sector_profiles if s['code'] and sector_name
+                                and (s['name'].strip().casefold() == sector_name
+                                     or (sector_name == 'housekeeping' and 'housekeeping' in s['name'].casefold()))]
+                    if len(matching) == 1:
+                        center = matching[0]['code']
+                    elif 'dirRecep' not in source:
+                        reasons.append('Finesa: volvé a importar el XML para leer DirRecep o elegí el sector.')
+                    elif not sector_name:
+                        reasons.append('Finesa: DirRecep no identifica el sector. Elegilo manualmente.')
+                    else:
+                        reasons.append('Finesa: revisá el sector '+('A&B' if sector_name=='a&b' else 'Housekeeping')+' en el catálogo.')
+                if center and decision.get('destinationKind') != 'concept':
+                    sector_mapping = profiles_by_code.get(center,{}).get('mapping',{})
             if not provider:
                 reasons.append('Elegí el proveedor del catálogo.')
             elif str(provider.get('rut', '')) != source['rut']:
@@ -429,12 +487,19 @@ class Store:
                     proposals.append({'index':index,'options':[],'rule':None,'reason':'Indicador fiscal especial: no es una tasa de IVA.','confidence':0})
                     continue
                 choice = decision.get('lines', {}).get(str(index))
-                rule_key = (source['rut'], raw['descripcion'].casefold().strip(), raw['indicadorIVA'])
-                historic = legacy_for_invoice.get(rule_key)
-                rule = rules_for_invoice.get(rule_key) or (historic if float((historic or {}).get('confidence', 0)) >= .95 else None)
-                candidates = [c for c in catalog if c['kind'] in {'article', 'concept'} and (raw['descripcion'].casefold() in str(c.get('name', '')).casefold() or raw['descripcion'].casefold() in [str(s).casefold() for s in c.get('synonyms', [])])]
-                confidence = 1 if rule_key in rules_for_invoice else float((historic or {}).get('confidence', .5))
-                proposals.append({'index': index, 'options': candidates[:8], 'rule': rule, 'reason': 'Regla confirmada para proveedor, descripción e IVA' if rule_key in rules_for_invoice else ('Sugerencia del histórico; revisar antes de confirmar' if historic else 'Coincidencia de descripción; requiere elección'), 'confidence': confidence})
+                if is_finesa:
+                    mapped = sector_mapping.get(raw['indicadorIVA'])
+                    rule = mapped if mapped and mapped.get('kind')=='article' else None
+                    reason = ('Artículo del sector según el IVA original'+
+                              (' y DirRecep.' if 'center' not in decision else '.')) if rule else 'Elegí un artículo para el IVA de esta línea.'
+                    proposals.append({'index':index,'options':[],'rule':rule,'reason':reason,'confidence':int(bool(rule))})
+                else:
+                    rule_key = (source['rut'], raw['descripcion'].casefold().strip(), raw['indicadorIVA'])
+                    historic = legacy_for_invoice.get(rule_key)
+                    rule = rules_for_invoice.get(rule_key) or (historic if float((historic or {}).get('confidence', 0)) >= .95 else None)
+                    candidates = [c for c in catalog if c['kind'] in {'article', 'concept'} and (raw['descripcion'].casefold() in str(c.get('name', '')).casefold() or raw['descripcion'].casefold() in [str(s).casefold() for s in c.get('synonyms', [])])]
+                    confidence = 1 if rule_key in rules_for_invoice else float((historic or {}).get('confidence', .5))
+                    proposals.append({'index': index, 'options': candidates[:8], 'rule': rule, 'reason': 'Regla confirmada para proveedor, descripción e IVA' if rule_key in rules_for_invoice else ('Sugerencia del histórico; revisar antes de confirmar' if historic else 'Coincidencia de descripción; requiere elección'), 'confidence': confidence})
                 if rule and decision.get('destinationKind') and rule.get('kind')!=decision['destinationKind']:rule=None
                 chosen = choice or rule
                 if chosen and chosen.get('ignore'):
@@ -462,7 +527,6 @@ class Store:
             payment = next((c for c in catalog if c['kind'] == 'payment' and c['code'] == effective_payment), None)
             if mode == 'cash' and not payment:
                 reasons.append('Elegí una forma de pago real.')
-            center = decision.get('center', learned_centers.get(source['rut'],''))
             if center and not any(c['kind'] == 'center' and c['code'] == center for c in catalog):
                 reasons.append('El centro elegido no está en el catálogo.')
             payload = {'clave': source['clave'], 'cfe': dict(source['totales'], **{k: source[k] for k in ('tipo','serie','numero','fecha','moneda')}), 'referencias': source.get('referencias', []), 'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra', 'proveedor': {'rut': source['rut'], 'nombre': source['nombre'], 'codigoZeta': provider['code'] if provider else ''}, 'lineas': lines, 'lineasIgnoradas': [int(i) for i, c in decision.get('lines', {}).items() if c.get('ignore')], 'zeta': {'comprobante': form, 'centroCosto': center, 'formaPago':payment['code'] if mode=='cash' and payment else '', 'formaPagoNombre':payment['name'] if mode=='cash' and payment else ''}, 'completo': True, 'estado': 'reviewed' if decision.get('reviewed') else 'auto'}
@@ -513,7 +577,7 @@ class Store:
                 reasons.append('Devolución contado: falta validar cómo Zeta registra el reintegro a caja; no se guarda automáticamente.')
             if decision.get('skip') or source['rut'] in settings.get('excluded_suppliers:'+company,{}):
                 state, reasons = 'skipped', []
-            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'reasons': reasons, 'suggested_center':center if 'center' not in decision and source['rut'] in learned_centers else '', 'auto_rounding_lines':sorted(auto_rounding_indices), 'non_monetary_lines':[idx for idx,raw in enumerate(source['lineas']) if raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0], 'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
+            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'reasons': reasons, 'finesa':is_finesa, 'suggested_center':center if 'center' not in decision else '', 'auto_rounding_lines':sorted(auto_rounding_indices), 'non_monetary_lines':[idx for idx,raw in enumerate(source['lineas']) if raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0], 'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
             with self.connect() as db:
                 for proposal in proposals:
                     db.execute('INSERT OR REPLACE INTO proposals VALUES(?,?,?,?)',(company,record['key'],proposal['index'],json.dumps(dict(proposal,generated=now()))))

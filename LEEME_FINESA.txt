@@ -1,0 +1,20 @@
+﻿CERECITO | FINESA E INTENTOS INTERRUMPIDOS
+
+Cerrá Cerecito y extraé este ZIP directamente en la carpeta donde está
+ABRIR_CERECITO.bat. Ejecutá ACTUALIZAR_CERECITO.bat y abrí Cerecito de nuevo.
+Este ZIP incluye la actualización de DirRecep para Finesa.
+
+Finesa
+Las entregas de Lavadero van a Housekeeping con artículos de limpieza.
+La dirección RUTA INTERBALNEARIA KM 115.5 (PDE) va a A&B con alimentos.
+Se usa el artículo del catálogo que corresponde al IVA original de cada línea.
+Para un lote importado antes del cambio, volvé a importar el XML o ZIP.
+
+IVA de artículos
+Cerecito compara el IVA del XML con la tasa que muestra Zeta. Si difieren,
+el resultado indica el renglón, el artículo y las tasas para revisar.
+
+Intentos interrumpidos
+Cerecito busca el ID del intento y comprueba la identidad, el sector y que el
+detalle esté vacío antes de retomar. Si ya hay líneas o importes, revisá el
+detalle del ID en Zeta y cotejalo con el XML.

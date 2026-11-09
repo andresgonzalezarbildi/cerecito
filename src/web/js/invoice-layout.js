@@ -19,7 +19,7 @@ lineHTML=function(i,l,n){
       <label>Buscar destino<input id="search${n}" placeholder="Código o descripción"></label>
       <div class="choices" id="choices${n}"></div>
       <small class="muted">${esc(i.proposals[n]?.reason||'')}</small>
-      <small class="muted">Cada destino que elijas se aprende para próximas facturas del mismo proveedor, descripción e IVA.</small></div></details>
+      <small class="muted">${i.finesa?'Los cambios de destino se guardan para este comprobante.':'Cada destino que elijas se aprende para próximas facturas del mismo proveedor, descripción e IVA.'}</small></div></details>
       ${['6','7'].includes(l.indicadorIVA)?`<button class="text-button" id="ignore${n}">${choice?.ignore?'Volver a incluir':'Ignorar línea'}</button>`:''}
     </div></div>`;
 };
@@ -29,6 +29,12 @@ function invoiceLayout(invoice,panel){
   sheet.classList.add('invoice-sheet');
   const head=sheet.querySelector('.invoice-head');
   head.classList.add('invoice-sticky');
+  if(invoice.finesa){
+    const address=document.createElement('p');
+    address.className='muted';
+    address.textContent='DirRecep · '+(invoice.source.dirRecep||'Sin dato');
+    head.querySelector('h2').after(address);
+  }
   const title=panel.querySelector('h3');title.remove();
   panel.className='invoice-sector';
   const mapping=$('sectorMapping');

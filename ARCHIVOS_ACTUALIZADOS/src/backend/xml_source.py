@@ -88,6 +88,7 @@ def parse_xml(content, filename=''):
     return {'clave':'|'.join((rut,kind,series,str(int(number)))), 'archivo':filename,
             'sha256CFE':hashlib.sha256(ET.canonicalize(ET.tostring(nodes[0],encoding='unicode'),strip_text=True,rewrite_prefixes=True).encode('utf-8')).hexdigest(),
             'sha256XML':hashlib.sha256(content).hexdigest(),'rut':rut,'receptor':target_rut,
+            'dirRecep':value(receiver,'DirRecep',''),
             'nombre':value(emitter,'RznSoc'),'tipo':kind,'serie':series,'numero':str(int(number)),
             'fecha':value(ident,'FchEmis'),'moneda':value(totals,'TpoMoneda','') if kind=='181' else value(totals,'TpoMoneda'),
             'tipoCambio':value(totals,'TpoCambio',''),'mntBruto':value(ident,'MntBruto','0'),'formaPagoXML':value(ident,'FmaPago',''),

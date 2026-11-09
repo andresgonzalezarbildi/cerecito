@@ -1,6 +1,8 @@
 """Exercise guarded Zeta reads and fiscal selectors against simulated pages."""
 from pathlib import Path
+import json
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from contextlib import nullcontext
@@ -36,6 +38,57 @@ class EngineBoundaryTests(unittest.TestCase):
                 cargar_lote.resume_empty_header(page,invoice,{'sha256XML':'hash'},previous,[{'docid':'42','edit':'edit'}],{'rut':'R','id':'C'})
             finish.assert_not_called()
 
+    def test_partial_header_reuses_only_empty_record_in_the_same_sector(self):
+        page=MagicMock()
+        invoice={'clave':'P|111|A|1','cfe':{'numero':'1','serie':'A','moneda':'UYU'},
+                 'proveedor':{'codigoZeta':'P'},'zeta':{'centroCosto':'AB'}}
+        previous={'docid':'42','sha256CFE':'same-cfe','sha256XML':'old-envelope'}
+        source={'sha256CFE':'same-cfe','sha256XML':'new-envelope'}
+        rows=[{'docid':'42','edit':'edit'}]
+        fields={'#vEMPRUT':'R','#vDOCNUMERO':'1','#vDOCSERIE':'A','#vPRVIDDOC':'P',
+                '#vCMPIDDOC':'21','#vMNDIDDOC':'1','#GridContainerDataV':'[]','#DOCID':'42'}
+        center=MagicMock()
+        center.count.return_value=1
+        center.input_value.return_value='HK'
+        page.locator.side_effect=lambda selector: (center if 'CENIDDOC' in selector else
+                                                    MagicMock(input_value=MagicMock(return_value=fields.get(selector,''))))
+        profile={'code':'21','editor':'lineacompras'}
+        with patch.object(cargar_lote,'plan_for',return_value=(invoice,{},profile)), \
+             patch.object(cargar_lote,'company_id',return_value='C'), \
+             patch.object(cargar_lote,'read_totals',return_value={'neto':'0','iva':'0','total':'0'}), \
+             patch.object(cargar_lote,'click_readonly'),patch.object(cargar_lote,'wait_path'), \
+             patch.object(cargar_lote,'save_operation_state'),patch.object(cargar_lote,'finish_lines') as finish:
+            with self.assertRaisesRegex(ValueError,'varios comprobantes'):
+                cargar_lote.resume_empty_header(page,invoice,source,previous,rows+[{'docid':'43'}],{'rut':'R','id':'C'})
+            with self.assertRaisesRegex(ValueError,'sector de la cabecera'):
+                cargar_lote.resume_empty_header(page,invoice,source,previous,rows,{'rut':'R','id':'C'})
+            finish.assert_not_called()
+            center.input_value.return_value='AB'
+            state=cargar_lote.resume_empty_header(page,invoice,source,previous,rows,{'rut':'R','id':'C'})
+            self.assertEqual(state['docid'],'42')
+            self.assertEqual(state['lineas_confirmadas'],[])
+            finish.assert_called_once()
+
+    def test_current_journal_resolution_takes_precedence_over_migrated_attempt(self):
+        key='P|111|A|1'
+        with tempfile.TemporaryDirectory() as tmp, patch.object(cargar_lote,'BASE',Path(tmp)):
+            archive=Path(tmp)/'entrada/migracion_anterior'
+            archived_state=archive/cargar_lote.operation_path(key)
+            archived_state.parent.mkdir(parents=True)
+            state={'clave':key,'estado':'INCIERTO','guardado_iniciado':True,'docid':'42'}
+            archived_state.write_text(json.dumps(state),encoding='utf-8-sig')
+            archived_log=archive/'estado/intentos.jsonl'
+            archived_log.write_text(json.dumps(state)+'\n',encoding='utf-8')
+            self.assertEqual(cargar_lote.incomplete_operation(key),state)
+            self.assertIn(key,cargar_lote.unresolved_attempts(archived_log))
+            current=Path(tmp)/cargar_lote.operation_path(key)
+            current.parent.mkdir(parents=True)
+            current.write_text(json.dumps(dict(state,estado='CONFIRMADO')),encoding='utf-8')
+            current_log=Path(tmp)/'estado/intentos.jsonl'
+            current_log.write_text(json.dumps(dict(state,estado='CONFIRMADO'))+'\n',encoding='utf-8')
+            self.assertIsNone(cargar_lote.incomplete_operation(key))
+            self.assertNotIn(key,cargar_lote.unresolved_attempts(archived_log,current_log))
+
     def test_generic_numberless_purchase_blocks_duplicate_by_date_and_total(self):
         invoice={'cfe':{'fecha':'2026-10-14','numero':'10507','total':'366'},'proveedor':{'codigoZeta':'G','generico':True}}
         row={'number':'','supplier':'G','text':'Bordados 366,00','docid':'42'}
@@ -69,6 +122,19 @@ class EngineBoundaryTests(unittest.TestCase):
         with patch.object(cargar_lote,'refresh_list',return_value={'filas':[{'number':'67','supplier':'P1','series':'B'}]}):
             self.assertFalse(cargar_lote.absence(MagicMock(),invoice)[0])
 
+    def test_partial_search_checks_all_pages_before_locating_the_edit_link(self):
+        invoice={'cfe':{'fecha':'2026-10-01','numero':'67','serie':'A'},'proveedor':{'codigoZeta':'P1'}}
+        first={'number':'67','supplier':'P1','series':'A','docid':'41'}
+        target=dict(first,docid='42')
+        with patch.object(cargar_lote,'refresh_list',return_value={'filas':[first,target],'consulta_completa':True}) as query:
+            self.assertFalse(cargar_lote.absence(MagicMock(),invoice,target_docid='42',scan_all=True)[0])
+            self.assertIsNone(query.call_args.kwargs['stop_when'])
+            self.assertFalse(cargar_lote.absence(MagicMock(),invoice,target_docid='42')[0])
+            found=query.call_args.kwargs['stop_when']
+            self.assertFalse(found(first))
+            self.assertFalse(found(dict(target,series='B')))
+            self.assertTrue(found(target))
+
     def test_incomplete_duplicate_query_cannot_authorize_save(self):
         invoice={'cfe':{'fecha':'2026-10-01','numero':'67'},'proveedor':{'codigoZeta':'P1'}}
         with patch.object(cargar_lote,'refresh_list',side_effect=RuntimeError('consulta paginada')):
@@ -90,6 +156,19 @@ class EngineBoundaryTests(unittest.TestCase):
         with patch.object(cargar_lote,'set_control') as setter:
             with self.assertRaises(ValueError):cargar_lote.apply_line_tax(page,{'indicadorIVA':'1'},{'destination':'article'})
             setter.assert_not_called()
+
+    def test_article_tax_uses_visible_rate_even_with_different_zeta_id(self):
+        page=MagicMock()
+        page.locator.return_value.evaluate.return_value={'value':'24','label':'24 - IVA 22,00 %'}
+        with patch.object(cargar_lote,'set_control') as setter:
+            cargar_lote.apply_line_tax(page,{'indicadorIVA':'3','codigoZeta':'AL103'},{'destination':'article'})
+            setter.assert_not_called()
+
+    def test_article_tax_disagrees_with_xml_even_if_zeta_id_used_to_match(self):
+        page=MagicMock()
+        page.locator.return_value.evaluate.return_value={'value':'2','label':'2 - IVA 10%'}
+        with self.assertRaisesRegex(ValueError,r'Renglón XML 4, artículo AL103.*requiere 22%.*IVA 10%'):
+            cargar_lote.apply_line_tax(page,{'indicadorIVA':'3','codigoZeta':'AL103','linea':'4'},{'destination':'article'})
 
     def test_zeta_rounding_limit_applies_to_each_document_total(self):
         with patch.object(cargar_lote,'ROUNDING_TOLERANCE',Decimal('1')):
