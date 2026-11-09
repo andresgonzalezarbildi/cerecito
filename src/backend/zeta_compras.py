@@ -277,14 +277,14 @@ def prepare_header(page, invoice, form='Compra Crédito', *, confirm_supplier=No
     click_readonly(page.locator('#DDO_AGAGREGARContainer_btnGroupDrop'))
     note=form.startswith('Nota de Crédito Compra')
     menu_form=('Nota de Crédito' if note else ('Compra Contado' if form.startswith('Compra Contado') else 'Compra Crédito'))
-    links=(page.locator('a[href^="z.gestion.comprobantes.facturaproveedor?"]') if note
-           else page.locator('a').filter(has_text=menu_form))
+    menu=page.locator('ul[role="menu"][aria-labelledby="DDO_AGAGREGARContainer_btnGroupDrop"]')
+    links=menu.locator('li > a[href^="z.gestion.comprobantes.facturaproveedor?"]')
     def match_menu(title):
-        text=title.strip().lower().replace('é','e').replace('á','a')
-        return (('nota' in text and 'credito' in text) or 'n/c' in text) if note else text==menu_form.lower()
-    matches=[links.nth(i) for i in range(links.count()) if match_menu(links.nth(i).inner_text())
-             and (links.nth(i).get_attribute('href') or '').startswith('z.gestion.comprobantes.facturaproveedor?')]
-    if len(matches)!=1: raise RuntimeError('Enlace de alta ambiguo: '+form)
+        text=' '.join(title.split()).lower().replace('é','e').replace('á','a')
+        return (('nota' in text and 'credito' in text) or 'n/c' in text) if note else text==menu_form.lower().replace('é','e').replace('á','a')
+    matches=[link for link in links.all() if match_menu(link.inner_text())]
+    if len(matches)!=1:
+        raise RuntimeError(f'El menú Agregar devolvió {len(matches)} enlaces para {menu_form} ({form}).')
     href=matches[0].get_attribute('href')
     page.goto('https://www.zetasoftware.com/'+href,wait_until='load')
     wait_path(page,'/z.gestion.comprobantes.facturaproveedor')
