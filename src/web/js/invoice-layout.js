@@ -6,8 +6,10 @@ lineHTML=function(i,l,n){
   if(i.auto_rounding_lines?.includes(n)){
     return `<div class="invoice-row ignored"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>Redondeo omitido por defecto; se conserva en el XML y se controla contra el total.</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>No requiere destino</small></div></div>`;
   }
-  if(l.indicadorIVA==='5' && Number(l.monto)===0){
-    return `<div class="invoice-row"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>Entrega gratuita de importe cero; conservada en el XML, no se carga como compra</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>No requiere destino</small></div></div>`;
+  if(Number(l.monto)===0||choice?.ignore||!['1','2','3','6','7'].includes(l.indicadorIVA)){
+    const message=choice?.ignore?'Línea ignorada. Se conserva en el XML.':(i.proposals[n]?.reason||'');
+    const canIgnore=Number(l.monto)===0||['6','7'].includes(l.indicadorIVA);
+    return `<div class="invoice-row ${choice?.ignore?'ignored':''}"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>${esc(message)}</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment">${canIgnore?`<button class="text-button" id="ignore${n}">${choice?.ignore?'Volver a incluir':'Ignorar línea'}</button>`:''}</div></div>`;
   }
   return `<div class="invoice-row ${choice?.ignore?'ignored':''}">
     <div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong>${choice?.ignore?'<small>Línea ignorada</small>':''}</div></div>
@@ -109,9 +111,59 @@ function invoiceLayout(invoice,panel){
   if(rows.length){rows[0].before(table);rows.forEach(row=>table.append(row));}
   const totals=document.createElement('div');totals.className='invoice-total';
   totals.innerHTML=`<span>Total del comprobante</span><strong>${esc(invoice.source.moneda)} ${esc(invoice.source.totales.total)}</strong>`;
-  table.after(totals);
+  if(rows.length)table.after(totals);
+  else sheet.querySelector(':scope > .actions').before(totals);
+  addTaxGrouping(invoice, rows.length ? table : totals);
   sheet.querySelector(':scope > .actions').classList.add('invoice-actions');
   sheet.querySelectorAll('.warning').forEach(el=>{if(!el.textContent.trim())el.remove();});
+}
+
+function addTaxGrouping(invoice,before){
+  const panel=document.createElement('section');
+  panel.className='tax-grouping';
+  const grouped=invoice.decision.groupByVat===true;
+  const manual=invoice.state==='manual';
+  panel.innerHTML=`<button type="button" id="toggleTaxGrouping" aria-pressed="${grouped}">${grouped?'Quitar agrupación por IVA':'Agrupar por IVA'}</button>`;
+  before.before(panel);
+  $('toggleTaxGrouping').onclick=()=>decide(invoice.key,{groupByVat:!grouped});
+  if(!grouped)return;
+
+  const planByVat=new Map((invoice.plan?.lineas||[]).map(line=>[line.indicadorIVA,line]));
+  const groups=(invoice.tax_groups||[]).map(group=>{
+    const line=planByVat.get(group.iva);
+    return line?{...group,base:line.baseEsperada,impuesto:line.ivaEsperado,importe:line.totalEsperado}:group;
+  });
+  const kind=$('destinationKind').value;
+  const linesByOrigin=new Map(invoice.payload.lineas.map(line=>[line.origenes[0],line]));
+  const formatter=new Intl.NumberFormat('es-UY',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const fmt=value=>value==null?'':formatter.format(value);
+  function destination(group){
+    if(manual||!['1','2','3'].includes(group.iva)||!group.origenes.length)return '';
+    const choices=group.origenes.map(index=>linesByOrigin.get(index)).map(line=>line?.tipoDestino===kind?line.codigoZeta:null);
+    const chosen=choices.every(code=>code===choices[0])?choices[0]:null;
+    const compatible=state.catalog.filter(c=>c.kind===kind&&(Array.isArray(c.vat)?c.vat:String(c.vat||'').split('|')).includes(group.iva));
+    return `<select data-tax-group="${esc(group.iva)}" aria-label="Destino para ${esc(group.etiqueta)}"><option value="">Elegir destino…</option>${compatible.map(c=>`<option value="${esc(c.code)}" ${chosen===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')}</select>`;
+  }
+  panel.insertAdjacentHTML('beforeend',`<p class="muted">${manual?'Desglose del XML para completar en Zeta. Cada tratamiento especial queda separado.':'Elegí un destino por tasa. El plan vuelve a comprobar bases, IVA y total.'}</p>
+    <div class="catalog-table"><table><thead><tr><th>Grupo</th><th>Base</th><th>IVA</th><th>Importe</th>${manual?'':'<th>Destino en Zeta</th>'}</tr></thead>
+    <tbody>${groups.map(g=>`<tr><td>${esc(g.etiqueta)}</td><td>${esc(fmt(g.base))}</td><td>${esc(fmt(g.impuesto))}</td><td>${esc(fmt(g.importe))}</td>${manual?'':`<td>${destination(g)}</td>`}</tr>`).join('')}</tbody></table></div>
+    <p class="muted">Total fiscal del XML · ${esc(invoice.source.moneda)} ${esc(fmt(invoice.source.totales.total))}${invoice.source.totales.pagar? ` · Importe a pagar ${esc(fmt(invoice.source.totales.pagar))}`:''}</p>
+    <button type="button" id="copyTaxGrouping">Copiar resumen</button>`);
+  panel.querySelectorAll('[data-tax-group]').forEach(select=>select.onchange=()=>{
+    if(!select.value)return;
+    const group=groups.find(g=>g.iva===select.dataset.taxGroup);
+    const lines=Object.fromEntries(group.origenes.map(index=>[index,{kind,code:select.value}]));
+    decide(invoice.key,{lines});
+  });
+  $('copyTaxGrouping').onclick=()=>action(async()=>{
+    const s=invoice.source;
+    const header=`${s.nombre} · ${s.serie}/${s.numero} · ${s.moneda}`;
+    const text=groups.map(g=>[g.etiqueta,fmt(g.base),fmt(g.impuesto),fmt(g.importe)].join('\t'));
+    text.push(['Total fiscal del XML','','',fmt(s.totales.total)].join('\t'));
+    if(s.totales.pagar!=null)text.push(['Importe a pagar','','',fmt(s.totales.pagar)].join('\t'));
+    await navigator.clipboard.writeText([header,'Grupo\tBase\tIVA\tImporte',...text].join('\n'));
+    $('notice').textContent='Resumen por IVA copiado.';
+  });
 }
 
 function supplierSearch(){

@@ -24,3 +24,18 @@ La elección guardada para el comprobante prevalece si el RUT de la ficha de
 Zeta es distinto. Cerecito comprueba el código elegido y conserva el RUT del XML.
 Si el proveedor vino de una coincidencia automática y aparece el rechazo de
 RUT, abrí el comprobante en Revisión y elegí el proveedor.
+
+Líneas de importe cero y agrupación por IVA
+En Revisión, usá Ignorar línea para omitir un renglón de importe cero.
+Podés volver a incluirlo desde el mismo renglón. El XML conserva su detalle.
+En Agrupar por IVA elegís un destino por tasa para la carga automática
+de comprobantes con IVA estándar. Cerecito comprueba las bases y totales.
+Para IVA en suspenso y otros indicadores especiales, abrí Resumen, luego
+Carga manual en Zeta y Ver detalle y agrupar. Agrupar por IVA y Copiar resumen
+preparan el desglose para completar en Zeta con los tratamientos separados.
+
+Volver a revisar lote
+Usá el botón junto a Revisar pendientes. Reinicia las decisiones y las
+confirmaciones del lote abierto, vuelve a buscar los comprobantes en Zeta
+y aplica las correlaciones aprendidas al preparar la revisión. Se conservan
+los XML, el historial de cargas y las correlaciones guardadas.

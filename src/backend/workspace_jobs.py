@@ -2,7 +2,7 @@
 import json
 import threading
 import uuid
-from workspace_store import now
+from workspace_store import batch_revision, now
 
 
 class Jobs:
@@ -25,8 +25,10 @@ class Jobs:
         with self.store.connect() as db:
             return [dict(r, data=json.loads(r['data'])) for r in db.execute('SELECT * FROM jobs WHERE company=? ORDER BY created DESC', (self.store.company(),))]
 
-    def start(self, request_id, save=False, precheck=False, invoice_keys=None):
+    def start(self, request_id, save=False, precheck=False, invoice_keys=None, *, reset_batch=None):
         if precheck and save:raise ValueError('La búsqueda previa no guarda facturas.')
+        if reset_batch is not None and (not precheck or invoice_keys is not None):
+            raise ValueError('El reinicio requiere una búsqueda para todo el lote.')
         if not request_id or len(request_id) > 100:
             raise ValueError('Falta identificador de operación.')
         company = self.store.company()
@@ -39,22 +41,28 @@ class Jobs:
             active = db.execute("SELECT id,data FROM jobs WHERE company=? AND status IN ('queued','running','cancelling')", (company,)).fetchone()
             if active:
                 running=json.loads(active['data'])
-                if bool(running.get('save'))!=bool(save) or bool(running.get('precheck'))!=bool(precheck):
+                if reset_batch is not None or bool(running.get('save'))!=bool(save) or bool(running.get('precheck'))!=bool(precheck):
                     raise ValueError('Hay otro trabajo en curso. Espera a que termine; la nueva carga todavia no se inicio.')
                 return active['id']
+            batch = self.store.reset_review(reset_batch) if reset_batch is not None else self.store.settings().get('batch',{})
             invoices = self.store.invoices()
             ready = [i for i in invoices if i['state'] not in {'skipped','non_invoice','loaded','manual'}] if precheck else [i for i in invoices if i['state'] == 'ready']
             if invoice_keys is not None:
                 if not precheck:raise ValueError('El filtro solo se admite para buscar existentes.')
                 ready=[i for i in ready if i['key'] in invoice_keys]
             if not ready:
+                if reset_batch is not None:return None
                 if any(i['state'] in {'existing','loaded'} for i in invoices) and not any(i['state']=='needs_review' for i in invoices):raise ValueError('Las facturas ya fueron cargadas. Consultá los resultados.')
                 raise ValueError('No hay facturas listas para procesar. Abrí Revisar pendientes y completá proveedor, destino y forma de pago cuando corresponda.')
             payload = {'comprobantes': [i['payload'] for i in ready], 'duplicates_only': precheck,
                        'identities':{i['key']:{'source_hash':i['source']['sha256CFE'],'supplier_code':i['payload']['proveedor']['codigoZeta']} for i in ready}}
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute("SELECT value FROM settings WHERE key='batch'").fetchone()
+            if batch_revision(json.loads(row['value']) if row else {})!=batch_revision(batch):
+                raise ValueError('El lote cambió antes de empezar. Volvé a iniciar la búsqueda.')
             event = threading.Event()
             self.events[request_id] = event
-            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)', (request_id, company, 'queued', json.dumps({'total': len(ready), 'done': 0, 'save': save, 'precheck':precheck, 'batch_date':self.store.settings().get('batch',{}).get('date'), 'items': []}), now()))
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)', (request_id, company, 'queued', json.dumps({'total': len(ready), 'done': 0, 'save': save, 'precheck':precheck, 'batch_date':batch_revision(batch), 'items': []}), now()))
             if save:
                 path=self.store.directory/'configuracion_zeta.json'
                 config=json.loads(path.read_text(encoding='utf-8-sig'))

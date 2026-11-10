@@ -96,6 +96,10 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=='/api/sector':store.apply_sector(data['key'],data['center'],data['mapping'])
             elif path=='/api/rule':store.rule(data['key'],int(data['index']))
             elif path=='/api/supplier/confirm':store.approve_supplier(data['key'],data['code'])
+            elif path=='/api/review/reset':
+                revision=data.get('revision')
+                if not isinstance(revision,str) or not revision:raise ValueError('Falta identificar el lote actual.')
+                result={'job':jobs.start(data['id'],precheck=True,reset_batch=revision)}
             elif path=='/api/jobs':result={'id':jobs.start(data['id'],bool(data.get('save')),bool(data.get('precheck')))}
             elif path=='/api/jobs/cancel':jobs.cancel(data['id'])
             elif path=='/api/chrome':

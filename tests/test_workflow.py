@@ -126,6 +126,57 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(invoice['payload']['lineas'][0]['codigoZeta'],'A1')
         self.assertNotIn('Elegí el destino de la línea 1',invoice['reasons'])
 
+    def test_reset_review_reapplies_learning_and_checks_only_current_pending_documents(self):
+        self.store.decide(self.key,{'skip':True})
+        outside_key=self.key
+        buffer=io.BytesIO()
+        with ZipFile(buffer,'w') as archive:
+            for number in (622,623,624):
+                archive.writestr(f'{number}.xml',xml(number).replace(b'<FmaPago>1',b'<FmaPago>2'))
+        batch=self.store.import_documents('reset.zip',buffer.getvalue())
+        invoices={i['source']['numero']:i for i in self.store.invoices()}
+        pending, skipped, loaded=[invoices[n]['key'] for n in ('622','623','624')]
+        self.store.decide(pending,{'supplier':'P1','center':'C1','groupByVat':True,
+                                   'lines':{'0':{'kind':'article','code':'A1'}},'reviewed':True},learn_lines=True)
+        self.store.decide(skipped,{'skip':True})
+        with self.store.connect() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)',('previous',COMPANY,'finished','{}',batch['date']))
+            for n,status in [('622','AUSENTE_VERIFICADO'),('624','CONFIRMADO')]:
+                item=invoices[n]
+                result={'estado':status,'source_hash':item['source']['sha256CFE'],'supplier_code':'P1'}
+                db.execute('INSERT INTO attempts(job,key,data,created) VALUES(?,?,?,?)',
+                           ('previous',item['key'],json.dumps(result),batch['date']))
+        received=[]
+        def runner(payload,save,progress,cancelled):
+            current={i['key']:i for i in self.store.invoices()}
+            self.assertEqual(current[pending]['duplicate_state'],'unchecked')
+            self.assertEqual(current[loaded]['state'],'loaded')
+            self.assertFalse(save)
+            self.assertTrue(payload['duplicates_only'])
+            for invoice in payload['comprobantes']:
+                received.append(invoice['clave'])
+                progress({'clave':invoice['clave'],'estado':'AUSENTE_VERIFICADO'})
+            return 0
+        jobs=Jobs(self.store,runner)
+        self.assertEqual(jobs.start('reset',precheck=True,reset_batch=batch['date']),'reset')
+        deadline=time.monotonic()+3
+        while jobs.list()[0]['status'] in {'queued','running'} and time.monotonic()<deadline:time.sleep(.01)
+        self.assertEqual(jobs.list()[0]['status'],'finished')
+        self.assertCountEqual(received,[pending,skipped])
+        self.assertEqual(jobs.list()[0]['data']['batch_date'],self.store.settings()['batch']['reset_at'])
+        self.assertEqual(self.store.settings()['batch']['date'],batch['date'])
+        invoice=next(i for i in self.store.invoices() if i['key']==pending)
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['decision'],{})
+        self.assertEqual(invoice['suggested_center'],'C1')
+        self.assertEqual(invoice['payload']['lineas'][0]['codigoZeta'],'A1')
+        self.assertEqual(invoice['duplicate_state'],'absent')
+        with self.store.connect() as db:
+            decision=db.execute('SELECT decision FROM invoices WHERE company=? AND key=?',(COMPANY,outside_key)).fetchone()[0]
+            self.assertTrue(json.loads(decision)['skip'])
+        with self.assertRaisesRegex(ValueError,'lote cambió'):
+            jobs.start('stale-reset',precheck=True,reset_batch=batch['date'])
+
     def test_sector_saved_for_supplier_and_reused(self):
         self.store.decide(self.key,{'center':'C1'})
         self.store.import_documents('new.xml',xml(346))
@@ -291,6 +342,48 @@ class WorkflowTests(unittest.TestCase):
     def test_product_cannot_be_ignored(self):
         self.store.decide(self.key,{'lines':{'0':{'ignore':True}}})
         self.assertIn('No se puede ignorar', ' '.join(self.store.invoices()[0]['reasons']))
+
+    def test_zero_amount_line_can_be_ignored_and_restored_for_any_indicator(self):
+        for number, indicator in [(619,'3'),(620,'12')]:
+            with self.subTest(indicator=indicator):
+                extra=f'<Item><NroLinDet>2</NroLinDet><NomItem>Importe cero</NomItem><IndFact>{indicator}</IndFact><MontoItem>0.00</MontoItem><Cantidad>1</Cantidad></Item>'
+                self.store.import_documents('zero.xml',xml(number,extra=extra))
+                key=self.store.invoices()[0]['key']
+                self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
+                self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
+                self.store.decide(key,{'lines':{'1':{'ignore':True}}})
+                invoice=Store(self.directory).invoices()[0]
+                self.assertEqual(invoice['state'],'ready')
+                self.assertEqual(invoice['plan']['lineasIgnoradas'],[1])
+                self.assertEqual(invoice['source']['lineas'][1]['monto'],'0.00')
+                self.store.decide(key,{'lines':{'1':{'ignore':False}}})
+                self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
+
+    def test_group_plan_preserves_origins_and_totals_by_vat(self):
+        from cargar_lote import allow_rounding
+        self.store.import_catalog([
+            {'kind':'article','code':'A10','name':'Artículo 10%','vat':'2'},
+            {'kind':'article','code':'A22','name':'Artículo 22%','vat':'3'},
+            {'kind':'article','code':'B22','name':'Otro artículo 22%','vat':'3'}])
+        extra=''.join(f'<Item><NroLinDet>{n}</NroLinDet><NomItem>Producto {n}</NomItem><IndFact>{vat}</IndFact><MontoItem>{amount}</MontoItem><Cantidad>1</Cantidad></Item>'
+                      for n, vat, amount in [(2,2,20),(3,2,30),(4,3,25),(5,3,75)])
+        raw=xml(621,'277',extra=extra).replace(b'<MntTotal>',
+            b'<MntNetoIvaTasaMin>50</MntNetoIvaTasaMin><MntIVATasaMin>5</MntIVATasaMin>'
+            b'<MntNetoIVATasaBasica>100</MntNetoIVATasaBasica><MntIVATasaBasica>22</MntIVATasaBasica><MntTotal>')
+        self.store.import_documents('grouped.xml',raw)
+        key=self.store.invoices()[0]['key']
+        lines={str(i):{'kind':'article','code':code} for i,code in enumerate(('A1','A10','A10','A22','B22'))}
+        self.store.decide(key,{'mode':'credit','lines':lines,'groupByVat':True})
+        self.assertIn('un solo destino',' '.join(self.store.invoices()[0]['reasons']))
+        self.store.decide(key,{'lines':{'4':{'kind':'article','code':'A22'}}})
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        grouped=allow_rounding(invoice['plan'])['lineas']
+        self.assertEqual([(l['origenes'],l['cantidadXML'],l['totalEsperado']) for l in grouped],
+                         [([0],'1','100.00'),([1,2],'1','55.00'),([3,4],'1','122.00')])
+        self.assertEqual(len(invoice['payload']['lineas']),5)
+        self.store.decide(key,{'groupByVat':False})
+        self.assertEqual(len(self.store.invoices()[0]['plan']['lineas']),5)
 
     def test_non_billable_rounding_can_be_ignored_with_origin(self):
         extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo sintético</NomItem><IndFact>6</IndFact><MontoItem>0.01</MontoItem><Cantidad>1</Cantidad></Item>'
