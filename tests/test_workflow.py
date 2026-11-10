@@ -303,7 +303,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(invoice['source']['lineas']),2)
         self.assertEqual(invoice['payload']['lineas'][0]['origenes'],[0])
 
-    def test_missing_rut_confirmation_persists_and_contradiction_blocks(self):
+    def test_confirmed_supplier_persists_when_catalog_rut_changes(self):
         self.store.import_catalog([{'kind':'supplier','code':'P1','name':'Proveedor sintético','rut':''}])
         self.choose()
         self.store.decide(self.key,{'center':'C1','reviewed':True})
@@ -314,7 +314,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(Store(self.directory).invoices()[0]['state'],'ready')
         self.assertEqual(self.store.invoices()[0]['decision'],dict(before,supplier='P1'))
         self.store.import_catalog([{'kind':'supplier','code':'P1','name':'Proveedor sintético','rut':'000000000003'}])
-        self.assertIn('contradice',' '.join(self.store.invoices()[0]['reasons']))
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+        self.assertTrue(self.store.invoices()[0]['payload']['proveedor']['seleccionManual'])
 
     def test_skip_has_no_missing_data_reasons(self):
         self.store.decide(self.key,{'skip':True})

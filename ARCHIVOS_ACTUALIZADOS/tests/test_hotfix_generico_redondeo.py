@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src/backend'))
+from conciliar import supplier_match
 from workspace_store import Store
 from xml_source import preview_net_lines
 from zeta_compras import validate_supplier_catalog
@@ -50,6 +51,35 @@ class HotfixTests(unittest.TestCase):
             validate_supplier_catalog({'codigoZeta':'G','rut':SUPPLIER},actual,{})
         with self.assertRaisesRegex(RuntimeError,'Código'):
             validate_supplier_catalog(supplier,{**actual,'codigoZeta':'OTRO'}, {})
+
+    def test_manual_supplier_uses_zeta_code_with_a_different_rut(self):
+        self.store.import_catalog([
+            {'kind':'supplier','code':'P2','name':'Otra ficha en Zeta','rut':'000000000098'}])
+        one=self.chosen()
+        self.store.decide(one['key'],{'supplier':'P2'})
+        restored=Store(self.tmp.name).invoices()[0]
+        self.assertEqual(restored['state'],'ready')
+        supplier=restored['payload']['proveedor']
+        self.assertEqual(supplier['rut'],SUPPLIER)
+        actual={'codigoZeta':'P2','rut':'000000000098','nombre':'Otra ficha en Zeta'}
+        validate_supplier_catalog(supplier,actual,{})
+        with self.assertRaisesRegex(RuntimeError,'Código'):
+            validate_supplier_catalog(supplier,{**actual,'codigoZeta':'OTRO'}, {})
+        self.assertTrue(supplier_match(restored['payload'],{'codigo':'P2','rut':actual['rut']})[0])
+        self.store.import_documents('two.xml',xml(611))
+        automatic=self.store.invoices()[0]['payload']['proveedor']
+        self.assertEqual(automatic['codigoZeta'],'P1')
+        self.assertNotIn('seleccionManual',automatic)
+        with self.assertRaisesRegex(RuntimeError,'contradictorio'):
+            validate_supplier_catalog(automatic,{**actual,'codigoZeta':'P1'}, {})
+
+    def test_saved_supplier_approval_requires_the_same_zeta_code_and_name(self):
+        supplier={'codigoZeta':'P1','rut':SUPPLIER}
+        actual={'codigoZeta':'P1','rut':'000000000098','nombre':'Ficha confirmada'}
+        approvals={SUPPLIER:{'codigoZeta':'P1','nombreZeta':'Ficha confirmada','confirmado_por_usuario':True}}
+        validate_supplier_catalog(supplier,actual,approvals)
+        with self.assertRaisesRegex(RuntimeError,'contradictorio'):
+            validate_supplier_catalog(supplier,{**actual,'nombre':'Otra ficha'},approvals)
 
     def test_redondeo_indfact6_automatico_con_control_de_total(self):
         extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo</NomItem><IndFact>6</IndFact><MontoItem>0.01</MontoItem><Cantidad>1</Cantidad></Item>'

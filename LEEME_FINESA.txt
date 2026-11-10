@@ -18,3 +18,9 @@ Intentos interrumpidos
 Cerecito busca el ID del intento y comprueba la identidad, el sector y que el
 detalle esté vacío antes de retomar. Si ya hay líneas o importes, revisá el
 detalle del ID en Zeta y cotejalo con el XML.
+
+Proveedor elegido en Cerecito
+La elección guardada para el comprobante prevalece si el RUT de la ficha de
+Zeta es distinto. Cerecito comprueba el código elegido y conserva el RUT del XML.
+Si el proveedor vino de una coincidencia automática y aparece el rechazo de
+RUT, abrí el comprobante en Revisión y elegí el proveedor.

@@ -78,16 +78,21 @@ function invoiceLayout(invoice,panel){
     $('kind'+n).value=$('destinationKind').value;
     renderChoices(invoice,n,$('search'+n).value,$('destinationKind').value);
   }
-  if(!invoice.payload.proveedor.codigoZeta||invoice.payload.proveedor.generico||invoice.reasons.some(r=>/proveedor/i.test(r)))supplierSearch();
+  const supplier=invoice.payload.proveedor;
+  const rutRejected=/RUT del proveedor contradictorio/i.test(invoice.last_result?.motivo||'');
+  if(!supplier.codigoZeta||supplier.seleccionManual||rutRejected||invoice.reasons.some(r=>/proveedor/i.test(r)))supplierSearch();
   else {
     $('supplier').closest('label').hidden=true;
     const provider=document.createElement('p');provider.className='muted';
     provider.textContent='Proveedor: '+$('supplier').selectedOptions[0].textContent;
-    fields.append(provider);
+    const changeSupplier=document.createElement('button');
+    changeSupplier.type='button';changeSupplier.textContent='Cambiar proveedor';
+    changeSupplier.onclick=()=>{provider.remove();changeSupplier.remove();supplierSearch();$('supplierSearch').focus();};
+    fields.append(provider,changeSupplier);
   }
-  if(invoice.payload.proveedor.generico){
+  if(supplier.seleccionManual){
     const note=document.createElement('p');note.className='muted';
-    note.textContent='Proveedor genérico para este comprobante: el RUT original del XML se conserva y esta asociación no se aprende para otras facturas.';
+    note.textContent='Para este comprobante se usa el código de proveedor elegido en Zeta y se conserva el RUT del XML.';
     fields.append(note);
   }
   const excluded=state.settings['excluded_suppliers:'+state.settings.company.rut]||{};
@@ -97,7 +102,7 @@ function invoiceLayout(invoice,panel){
   sheet.querySelector(':scope > .actions').append(skipSupplier);
   // Modality remains readily accessible alongside the invoice identity.
   const mode=$('mode').closest('label');mode.classList.add('invoice-mode');head.children[1].append(mode);
-  if(invoice.reasons.some(r=>/proveedor|pago|centro/i.test(r)))extra.open=true;
+  if(rutRejected||invoice.reasons.some(r=>/proveedor|pago|centro/i.test(r)))extra.open=true;
   const rows=Array.from(sheet.querySelectorAll('.invoice-row'));
   const table=document.createElement('section');table.className='invoice-lines';table.setAttribute('aria-label','Detalle de la factura');
   table.innerHTML='<div class="invoice-columns"><span>Descripción</span><span>Cant.</span><span>IVA</span><span>Importe</span><span>Destino en Zeta</span></div>';
@@ -111,7 +116,7 @@ function invoiceLayout(invoice,panel){
 
 function supplierSearch(){
   const select=$('supplier'),label=select.closest('label');
-  select.hidden=true;
+  label.hidden=false;select.hidden=true;
   const input=document.createElement('input');input.id='supplierSearch';input.type='search';
   input.placeholder='Escribí nombre, código o RUT';input.setAttribute('aria-label','Buscar proveedor');
   input.autocomplete='off';

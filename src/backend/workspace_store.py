@@ -425,11 +425,8 @@ class Store:
                 confirmed = [c for c in catalog if c['kind']=='supplier' and settings.get('approvals',{}).get(c['code'])==source['rut']]
                 if len(confirmed)==1:selected_supplier=confirmed[0]
             provider = selected_supplier or (supplier[0] if len(supplier) == 1 else None)
-            generic_override = bool(
-                selected_supplier and decision.get('supplier') == selected_supplier['code']
-                and ('genérico' in selected_supplier['name'].casefold()
-                     or 'generico' in selected_supplier['name'].casefold())
-            )
+            manual_supplier = bool(selected_supplier and decision.get('supplier') == selected_supplier['code'])
+            generic_override = manual_supplier and 'generico' in selected_supplier['name'].casefold().replace('é','e')
             reasons, proposals, lines = [], [], []
             is_finesa = source['rut'] == FINESA_RUT and source['tipo'] in {'111','112'}
             center = decision.get('center', learned_centers.get(source['rut'],''))
@@ -454,13 +451,11 @@ class Store:
                     sector_mapping = profiles_by_code.get(center,{}).get('mapping',{})
             if not provider:
                 reasons.append('Elegí el proveedor del catálogo.')
-            elif str(provider.get('rut', '')) != source['rut']:
-                approvals = settings.get('approvals', {})
-                if generic_override:
-                    pass  # Selección manual por comprobante, no se aprende una relación de RUT.
-                elif provider.get('rut'):
+            elif (not manual_supplier and str(provider.get('rut', '')) != source['rut']
+                  and settings.get('approvals', {}).get(provider['code']) != source['rut']):
+                if provider.get('rut'):
                     reasons.append('El RUT del proveedor contradice el XML.')
-                elif approvals.get(provider['code']) != source['rut']:
+                else:
                     reasons.append('Confirmá la relación del proveedor sin RUT.')
             mode_locked=source['formaPagoXML']=='2'
             mode = 'credit' if mode_locked else (decision.get('mode') or ('cash' if source['formaPagoXML'] == '1' else 'credit'))
@@ -531,6 +526,7 @@ class Store:
                 reasons.append('El centro elegido no está en el catálogo.')
             payload = {'clave': source['clave'], 'cfe': dict(source['totales'], **{k: source[k] for k in ('tipo','serie','numero','fecha','moneda')}), 'referencias': source.get('referencias', []), 'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra', 'proveedor': {'rut': source['rut'], 'nombre': source['nombre'], 'codigoZeta': provider['code'] if provider else ''}, 'lineas': lines, 'lineasIgnoradas': [int(i) for i, c in decision.get('lines', {}).items() if c.get('ignore')], 'zeta': {'comprobante': form, 'centroCosto': center, 'formaPago':payment['code'] if mode=='cash' and payment else '', 'formaPagoNombre':payment['name'] if mode=='cash' and payment else ''}, 'completo': True, 'estado': 'reviewed' if decision.get('reviewed') else 'auto'}
             if generic_override:payload['proveedor']['generico']=True
+            if manual_supplier:payload['proveedor']['seleccionManual']=True
             plan = None
             if not reasons:
                 try:
@@ -583,7 +579,7 @@ class Store:
                     db.execute('INSERT OR REPLACE INTO proposals VALUES(?,?,?,?)',(company,record['key'],proposal['index'],json.dumps(dict(proposal,generated=now()))))
         return result
 
-    def approve_supplier(self, key, code):
+    def approve_supplier(self, key, code, *, only_if_unassigned=False):
         self.assert_idle()
         invoice = next(i for i in self.invoices() if i['key'] == key)
         supplier = next(c for c in self.catalog() if c['kind'] == 'supplier' and c['code'] == code)
@@ -595,6 +591,7 @@ class Store:
         settings = self.settings()
         approvals = settings.get('approvals', {})
         if code in approvals and approvals[code] != invoice['source']['rut']:
+            if only_if_unassigned:return
             raise ValueError('Ese proveedor ya está relacionado con otro RUT.')
         approvals[code] = invoice['source']['rut']
         with self.connect() as db:

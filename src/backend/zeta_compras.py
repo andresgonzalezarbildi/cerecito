@@ -221,12 +221,16 @@ def validate_supplier_catalog(supplier, actual, approvals):
         if not ('genérico' in actual.get('nombre', '').casefold() or 'generico' in actual.get('nombre', '').casefold()):
             raise RuntimeError('El código ya no identifica al proveedor genérico en Zeta.')
         return
+    if supplier.get('seleccionManual') is True:return
+    approval=approvals.get(supplier['rut'],{})
+    if (approval.get('codigoZeta')==actual['codigoZeta']
+            and approval.get('nombreZeta')==actual['nombre']
+            and approval.get('confirmado_por_usuario') is True):
+        return
     if actual['rut']:
         if actual['rut']!=supplier['rut']:raise RuntimeError('RUT del proveedor contradictorio: no se carga.')
     else:
-        approval=approvals.get(supplier['rut'],{})
-        if approval.get('codigoZeta')!=actual['codigoZeta'] or approval.get('nombreZeta')!=actual['nombre'] or approval.get('confirmado_por_usuario') is not True:
-            raise SupplierApprovalRequired(supplier,actual)
+        raise SupplierApprovalRequired(supplier,actual)
 
 
 def supplier_catalog_match(page,supplier,*,open_new=True):

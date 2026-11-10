@@ -90,8 +90,8 @@ class Handler(SimpleHTTPRequestHandler):
                 store.decide(data['key'],data['patch'],learn_lines=bool(data.get('learn_lines')))
                 if data['patch'].get('supplier'):
                     supplier=next((c for c in store.catalog() if c['kind']=='supplier' and c['code']==data['patch']['supplier']),None)
-                    if supplier and not supplier.get('rut'):
-                        store.approve_supplier(data['key'],supplier['code'])
+                    if supplier and not supplier.get('rut') and 'generico' not in supplier['name'].casefold().replace('é','e'):
+                        store.approve_supplier(data['key'],supplier['code'],only_if_unassigned=True)
                     result['job']=jobs.start(secrets.token_urlsafe(20),precheck=True,invoice_keys=[data['key']])
             elif path=='/api/sector':store.apply_sector(data['key'],data['center'],data['mapping'])
             elif path=='/api/rule':store.rule(data['key'],int(data['index']))

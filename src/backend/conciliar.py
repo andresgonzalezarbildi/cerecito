@@ -268,6 +268,8 @@ def supplier_match(invoice, row):
     invoice_rut = digits(p.get("rut"))
     invoice_code = normal(p.get("codigoZeta"))
     invoice_name = normal(p.get("nombre"))
+    if p.get("seleccionManual") is True and invoice_code and invoice_code == row["codigo"]:
+        return True, "código Zeta elegido"
     # Conflictos fuertes entre identificadores conocidos: nunca afirmar coincidencia.
     if invoice_rut and row["rut"]:
         return invoice_rut == row["rut"], "RUT"

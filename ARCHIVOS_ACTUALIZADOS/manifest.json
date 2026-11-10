@@ -1,12 +1,17 @@
 {
-  "version": "2026-11-09-finesa-iva-y-cargas-interrumpidas",
+  "version": "2026-11-10-proveedor-elegido",
   "archivos": {
     "src/backend/xml_source.py": "fbeab9b0a84504fcd117c9f66ba9756bc2cc419b445999137189405b4e7e3118",
-    "src/backend/workspace_store.py": "a64fa0e123bc694c756952a784e3da1953ca67c627fc8ea189f18892d09743cf",
+    "src/backend/workspace_store.py": "6442c5aa3f300fe92684461bcf295b4b342ad144bfa62e2e7a8e85faec6ee18a",
     "src/backend/cargar_lote.py": "fbaffcdc278381ca3c15292e4269f1e986c9f21d4f029ea449fc278a8d30d6ce",
     "src/backend/zeta_bot.py": "f996f9a2e61df69063d7655d5614087e650e5471950a66e0ce410ac0fec83219",
-    "src/web/js/workflow.js": "45f06511caa7fac2ce28f351178df9ae77e708e941e90a148e2167f7a71201a6",
-    "src/web/js/invoice-layout.js": "76a0183ac3f794ea0f207c409e4800a8e24a8bbec9ad9c61100d202c8f8fa94b",
-    "tests/test_engine_boundaries.py": "e8eede84c4fdc89e4d1f35b417e048d6a5613de575d89df1386b422a5428b8c6"
+    "src/web/js/workflow.js": "354a452ab9f6cab45b3c386198d9407dc51dc30f95fca64018e86e95e4683f3f",
+    "src/web/js/invoice-layout.js": "989e168d457e7f0d5dc78087052a0e2fa19c5f993ff067d50b0d067a354933e7",
+    "tests/test_engine_boundaries.py": "e8eede84c4fdc89e4d1f35b417e048d6a5613de575d89df1386b422a5428b8c6",
+    "launcher.py": "cebd766f031b42e6aad62a05bbfef89179d0f772a856501936e05d54747bf695",
+    "src/backend/zeta_compras.py": "e78473eaf1858e72a17852bac50d292b7a62171c2c45c09e68da82bb0e7a9e79",
+    "src/backend/conciliar.py": "9849dff1aab72543ad8dd447cbe4695641b3f05304aff44832570f7fd09b9556",
+    "tests/test_hotfix_generico_redondeo.py": "d31e42d36bee0250febc79fe7cc3057fccdf1a1b1efaf08a2fb2d3b4998434fa",
+    "tests/test_workflow.py": "90427acc39d82757b2d9bbfb95096dc440764f19a512b8d8caa9308a22d33685"
   }
 }
