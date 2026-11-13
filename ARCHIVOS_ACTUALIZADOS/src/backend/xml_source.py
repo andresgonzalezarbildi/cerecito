@@ -10,10 +10,17 @@ import xml.etree.ElementTree as ET
 
 CENT = Decimal('0.01')
 PRECISION = Decimal('0.00001')
-VAT_RATES = {'1':Decimal('0'), '2':Decimal('0.10'), '3':Decimal('0.22')}
+VAT_RATES = {'1':Decimal('0'), '2':Decimal('0.10'), '3':Decimal('0.22'), '11':Decimal('0'), '12':Decimal('0')}
 VAT_LABELS = {'1':'Exento / no gravado', '2':'IVA 10%', '3':'IVA 22%', '5':'Entrega gratuita',
               '6':'No facturable (suma)', '7':'No facturable (resta)',
               '11':'Impuesto percibido', '12':'IVA en suspenso', '16':'Indicador fiscal 16'}
+
+
+def validate_zeta_vat_choice(indicator, choice):
+    if not isinstance(choice,str) or choice not in {'1','2','3'}:
+        raise SourceError('Elegí Sin IVA, 10% o 22% para Zeta.')
+    if indicator not in VAT_RATES or VAT_RATES[indicator]!=VAT_RATES[choice]:
+        raise SourceError('El IVA elegido en Zeta cambia el impuesto del XML. Revisá la tasa de '+VAT_LABELS.get(indicator,indicator)+'.')
 
 
 class SourceError(ValueError):
@@ -68,7 +75,7 @@ def parse_xml(content, filename=''):
         'netoMin':'MntNetoIvaTasaMin','netoBas':'MntNetoIVATasaBasica',
         'noGravado':'MntNoGrv','exento':'MntExe','ivaMin':'MntIVATasaMin',
         'ivaBas':'MntIVATasaBasica','total':'MntTotal'}.items()}
-    for name, tag in {'suspenso':'MntIVaenSusp', 'pagar':'MntPagar'}.items():
+    for name, tag in {'suspenso':'MntIVaenSusp', 'impuestoPercibido':'MntImpuestoPerc', 'pagar':'MntPagar'}.items():
         amount=value(totals,tag,'')
         if amount:fiscal[name]=str(decimal_value(amount))
     items=[]
@@ -85,13 +92,18 @@ def parse_xml(content, filename=''):
                       'cantidad':str(decimal_value(value(item,'Cantidad','1')))})
     references = []
     for ref in nodes[0].findall('.//{*}Referencia'):
-        references.append({
+        reference_number=value(ref,'NroCFERef','')
+        legacy_number=value(ref,'NroDocRef','')
+        if reference_number and legacy_number and reference_number.lstrip('0')!=legacy_number.lstrip('0'):
+            raise SourceError('La referencia contiene números de comprobante contradictorios.')
+        reference={
             'tipo': value(ref, 'TpoDocRef', ''),
             'serie': value(ref, 'Serie', ''),
-            'numero': value(ref, 'NroDocRef', ''),
+            'numero': reference_number or legacy_number,
             'global': value(ref, 'IndGlobal', ''),
             'motivo': value(ref, 'RazonRef', ''),
-        })
+        }
+        if any(reference.values()):references.append(reference)
     return {'clave':'|'.join((rut,kind,series,str(int(number)))), 'archivo':filename,
             'sha256CFE':hashlib.sha256(ET.canonicalize(ET.tostring(nodes[0],encoding='unicode'),strip_text=True,rewrite_prefixes=True).encode('utf-8')).hexdigest(),
             'sha256XML':hashlib.sha256(content).hexdigest(),'rut':rut,'receptor':target_rut,
@@ -99,7 +111,8 @@ def parse_xml(content, filename=''):
             'nombre':value(emitter,'RznSoc'),'tipo':kind,'serie':series,'numero':str(int(number)),
             'fecha':value(ident,'FchEmis'),'moneda':value(totals,'TpoMoneda','') if kind=='181' else value(totals,'TpoMoneda'),
             'tipoCambio':value(totals,'TpoCambio',''),'mntBruto':value(ident,'MntBruto','0'),'formaPagoXML':value(ident,'FmaPago',''),
-            'ajustesGlobales':bool(nodes[0].findall('.//{*}DscRcgGlobal')),
+            'ajustesGlobales':any(len(section) or (section.text or '').strip()
+                                  for section in nodes[0].findall('.//{*}DscRcgGlobal')),
             'totales':fiscal,'lineas':items,'referencias':references,
             'retencionesXML':ET.tostring(nodes[0],encoding='unicode') if kind in {'181','182','183'} else None,
             'alcance':'Identidad y consistencia fiscal; no verifica firma digital ni aceptación por DGI.'}
@@ -154,6 +167,21 @@ def can_ignore_line(line):
     return line['indicadorIVA'] in {'6','7'} or decimal_value(line['monto']) == 0
 
 
+def zero_line_indices(source):
+    return [index for index,line in enumerate(source['lineas']) if decimal_value(line['monto'])==0]
+
+
+def is_zero_collection(source):
+    """Cobranza sin compra fiscal, aunque MntPagar sea distinto de cero."""
+    totals=source['totales']
+    monetary=[line for line in source['lineas'] if decimal_value(line['monto'])!=0]
+    return (source['tipo']=='111' and decimal_value(totals['total'])==0 and bool(monetary)
+            and not source.get('ajustesGlobales')
+            and all(decimal_value(totals.get(key,'0'))==0 for key in
+                    ('netoMin','netoBas','noGravado','exento','suspenso','impuestoPercibido','ivaMin','ivaBas'))
+            and all(line['indicadorIVA'] in {'6','7'} for line in monetary))
+
+
 def ignored_line_indices(source, invoice):
     indices=invoice.get('lineasIgnoradas',[])
     if not isinstance(indices,list) or any(type(index) is not int for index in indices) or len(set(indices))!=len(indices):
@@ -163,7 +191,8 @@ def ignored_line_indices(source, invoice):
             raise SourceError('Línea ignorada fuera del XML.')
         if not can_ignore_line(source['lineas'][index]):
             raise SourceError('Solo se pueden ignorar líneas de importe cero o líneas no facturables (indicadores 6/7).')
-    return indices
+    included={index for line in invoice.get('lineas',[]) for index in line.get('origenes',[])}
+    return sorted(set(indices) | (set(zero_line_indices(source))-included))
 
 
 def valid_credit_note_reference(references):
@@ -205,6 +234,20 @@ def rounding_line_indices(source, tolerance=Decimal('1.00')):
     return result
 
 
+def payable_rounding(source, indices, tolerance):
+    totals=source['totales']
+    fiscal=cents(totals['total'])
+    delta=cents(totals.get('pagar',fiscal))-fiscal
+    if not delta or abs(delta)>min(tolerance,Decimal('1.00')):
+        return None
+    origins=[i for i in indices if source['lineas'][i]['indicadorIVA'] in {'6','7'}]
+    amount=sum((abs(decimal_value(source['lineas'][i]['monto']))*
+                (-1 if source['lineas'][i]['indicadorIVA']=='7' else 1) for i in origins),Decimal(0))
+    if origins and amount==delta:
+        return {'monto':str(delta),'origenes':sorted(origins)}
+    return None
+
+
 def tax_breakdown(source, excluded):
     """Desglose para revisión con los importes fiscales del encabezado."""
     totals = source['totales']
@@ -213,14 +256,15 @@ def tax_breakdown(source, excluded):
     taxes = {'1':Decimal(0), '2':cents(totals['ivaMin']), '3':cents(totals['ivaBas'])}
     indices = {}
     for index, line in enumerate(source['lineas']):
-        if index not in excluded and decimal_value(line['monto']) != 0:
+        if index not in excluded:
             indices.setdefault(line['indicadorIVA'], []).append(index)
     result = []
     for vat in sorted(indices, key=lambda v:(len(v),v)):
         origins = indices.get(vat,[])
         base, tax = bases.get(vat), taxes.get(vat)
-        if vat == '12':
-            base = cents(totals['suspenso']) if 'suspenso' in totals else sum(
+        if vat in {'11','12'}:
+            field={'11':'impuestoPercibido','12':'suspenso'}[vat]
+            base = cents(totals[field]) if field in totals else sum(
                 (decimal_value(source['lineas'][index]['monto']) for index in origins), Decimal(0))
             tax = Decimal(0)
         total = (base + tax) if base is not None else sum(
@@ -238,14 +282,19 @@ def group_plan_by_vat(lines):
     for line in lines:
         groups.setdefault(line['indicadorIVA'],[]).append(line)
     result = []
-    for vat, members in sorted(groups.items()):
-        if len({(line['tipoDestino'],line['codigoZeta']) for line in members}) != 1:
-            raise SourceError('Elegí un solo destino para el grupo '+VAT_LABELS[vat]+'.')
+    # Check the special tax first in Zeta before entering any regular line.
+    for vat, members in sorted(groups.items(),key=lambda item:(item[0]!='12',item[0])):
+        if len({(line['tipoDestino'],line['codigoZeta'],line.get('ivaZeta')) for line in members}) != 1:
+            raise SourceError('Elegí un solo destino e IVA en Zeta para el grupo '+VAT_LABELS[vat]+'.')
         net = cents(sum((decimal_value(line['netoPropuesto5Decimales']) for line in members), Decimal(0)))
         tax = cents(net*VAT_RATES[vat])
         original = str(sum((decimal_value(line['montoXML']) for line in members), Decimal(0)))
+        suffix = {'1':'exento','2':'10%','3':'22%','11':'impuesto percibido','12':'IVA en suspenso'}[vat]
+        family = re.sub(r'\s*[-–(/]?\s*(?:iva\s*)?(?:0\s*%|10\s*%|22\s*%|exent[oa]s?|(?:en\s+)?suspenso)\s*\)?$',
+                        '', members[0]['descripcionZeta'], flags=re.I).strip()
+        if family.isupper():family=family.capitalize()
         result.append(dict(members[0], origenes=[i for line in members for i in line['origenes']],
-                           descripcionXML=VAT_LABELS[vat], cantidad='1', cantidadXML='1',
+                           descripcionXML=' '.join(filter(None,(family,suffix))), cantidad='1', cantidadXML='1',
                            monto=original, montoXML=original,
                            netoPropuesto5Decimales=str(net.quantize(PRECISION)),
                            baseEsperada=str(net), ivaEsperado=str(tax), totalEsperado=str(net+tax)))
@@ -263,6 +312,8 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         raise SourceError('El receptor del XML no es la empresa de Zeta.')
     if source['tipo'] not in {'111', '112'}:
         raise SourceError('Tipo CFE sin plan de compras validado: '+source['tipo'])
+    if is_zero_collection(source):
+        raise SourceError('Cobranza sin importe fiscal: se saltea automáticamente.')
     is_credit_note = source['tipo'] == '112'
     if is_credit_note and cents(source['totales']['total']) <= 0:
         raise SourceError('Nota de crédito sin monto fiscal positivo; requiere revisión antes de cargar.')
@@ -283,12 +334,16 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
             raise SourceError('Difiere el total fiscal '+field+' entre JSON y XML.')
     if invoice['cfe'].get('noGravado') is not None and cents(invoice['cfe']['noGravado']) != cents(source['totales']['noGravado']):
         raise SourceError('Difiere el importe exento/no gravado entre JSON y XML.')
+    if invoice['cfe'].get('impuestoPercibido') is not None and cents(invoice['cfe']['impuestoPercibido']) != cents(source['totales'].get('impuestoPercibido','0')):
+        raise SourceError('Difiere el importe de impuesto percibido entre JSON y XML.')
     if source['mntBruto'] not in {'0','1'}:
         raise SourceError('Indicador de montos brutos aún no soportado.')
     manual_ignored=ignored_line_indices(source,invoice)
-    no_monetarias=[i for i in non_monetary_line_indices(source) if i not in manual_ignored]
+    included={index for line in invoice['lineas'] for index in line.get('origenes',[])}
+    no_monetarias=[i for i in non_monetary_line_indices(source) if i not in included]
     auto_rounding=[i for i in rounding_line_indices(source,rounding_tolerance) if i not in manual_ignored]
-    assigned=list(manual_ignored)+no_monetarias+auto_rounding
+    assigned=sorted(set(manual_ignored) | set(no_monetarias) | set(auto_rounding))
+    grouped=invoice.get('agruparPorIVA') is True
     result=[]
     bases=dict.fromkeys(VAT_RATES, Decimal(0))
     taxes=dict.fromkeys(VAT_RATES, Decimal(0))
@@ -304,20 +359,25 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         if str(line.get('indicadorIVA',''))!=raw['indicadorIVA']:
             raise SourceError('Indicador IVA distinto del XML.')
         indicator=raw['indicadorIVA']
-        if indicator not in bases:
+        if indicator not in bases or (indicator in {'11','12'} and not grouped):
             raise SourceError('Indicador fiscal XML '+indicator+' sin plan validado; no corresponde modificarlo en Cerecito.')
+        if 'ivaZeta' in line:
+            validate_zeta_vat_choice(indicator,line['ivaZeta'])
         if not str(line.get('codigoZeta','')).strip() or not str(line.get('descripcionZeta','')).strip():
             raise SourceError('Falta código o descripción del artículo/concepto Zeta. Corregir en Correlaciones → Comprobantes.')
         if cents(line['monto'])!=cents(raw['monto']):
             raise SourceError('El importe original de Cerecito difiere del XML.')
         rate=VAT_RATES[indicator]
         original=decimal_value(raw['monto'])
-        if original <= 0 or decimal_value(raw['cantidad']) <= 0:
-            raise SourceError('Línea nula/negativa sin flujo específico validado.')
+        if not grouped and original < 0:
+            raise SourceError('Agrupá por IVA para descontar las líneas negativas de su base e impuesto.')
+        if not grouped and decimal_value(raw['cantidad']) <= 0:
+            raise SourceError('La cantidad XML no es positiva. Agrupá por IVA para cargar el importe con cantidad uno.')
         net=(original/(1+rate) if source['mntBruto']=='1' else original).quantize(PRECISION,rounding=ROUND_HALF_UP)
         base=cents(net)
         tax=cents(net*rate)
         entry=deepcopy(line)
+        if indicator=='11' and 'ivaZeta' not in entry:entry['ivaZeta']='1'
         entry.update(descripcionXML=raw['descripcion'],montoXML=str(original),cantidadXML=raw['cantidad'],netoPropuesto5Decimales=str(net),
                      baseEsperada=str(base),ivaEsperado=str(tax),totalEsperado=str(base+tax))
         result.append(entry)
@@ -325,12 +385,28 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         raise SourceError('Hay líneas XML omitidas; no se completa el plan.')
     if not result:
         raise SourceError('El comprobante quedó sin líneas con importe para cargar.')
-    if invoice.get('agruparPorIVA') is True:
+    adjustment=None
+    if grouped:
         result=group_plan_by_vat(result)
+        adjustment=payable_rounding(source,auto_rounding,rounding_tolerance)
+        rounding_tolerance=Decimal(0)
+        if 'pagar' in source['totales'] and cents(source['totales']['pagar'])!=cents(source['totales']['total']):
+            if not adjustment:
+                raise SourceError('El importe a pagar difiere del total fiscal. Zeta requiere registrar el ajuste por separado para conservar ambos importes.')
+            target=invoice.get('destinoRedondeo')
+            if not isinstance(target,dict) or not str(target.get('codigoZeta','')).strip() or not str(target.get('descripcionZeta','')).strip():
+                raise SourceError('Elegí el destino del redondeo de '+adjustment['monto']+' en Agrupar por IVA.')
+            if {line['tipoDestino'] for line in result}!={target.get('tipoDestino')}:
+                raise SourceError('El redondeo debe usar el mismo tipo de destino que el resto de la factura.')
     for line in result:
         bases[line['indicadorIVA']]+=decimal_value(line['baseEsperada'])
         taxes[line['indicadorIVA']]+=decimal_value(line['ivaEsperado'])
     expectations={'netoMin':bases['2'],'netoBas':bases['3'],'ivaMin':taxes['2'],'ivaBas':taxes['3']}
+    suspended_total=cents(source['totales'].get('suspenso','0'))
+    if bases['12']!=suspended_total:
+        raise SourceError('El grupo de IVA en suspenso no reproduce el importe del encabezado XML. Volvé a importar el lote si falta el dato.')
+    if bases['11']!=cents(source['totales'].get('impuestoPercibido','0')):
+        raise SourceError('El grupo de impuesto percibido no reproduce el importe del encabezado XML. Volvé a importar el lote para leer MntImpuestoPerc.')
     exempt_total=cents(source['totales'].get('noGravado','0'))+cents(source['totales'].get('exento','0'))
     if abs(bases['1']-exempt_total)>rounding_tolerance:
         raise SourceError('El importe exento/no gravado de las líneas no reproduce los totales XML.')
@@ -342,17 +418,29 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     total_difference=sum(bases.values())+sum(taxes.values())-cents(source['totales']['total'])
     if total_difference:differences['total']=str(total_difference)
     if bases['1']!=exempt_total:differences['exento']=str(bases['1']-exempt_total)
-    return {'clave':source['clave'],'sha256XML':source['sha256XML'],'mntBruto':source['mntBruto'],
+    plan={'clave':source['clave'],'sha256XML':source['sha256XML'],'mntBruto':source['mntBruto'],
+            'agrupadoPorIVA':grouped,
             'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra',
             'signoContable':-1 if is_credit_note else 1,
             'referencias':source.get('referencias', []),
             'diferenciasAceptadas':differences,'toleranciaRedondeo':str(rounding_tolerance),
-            'lineasIgnoradas':invoice.get('lineasIgnoradas',[]),
+            'lineasIgnoradas':manual_ignored,
             'lineasNoMonetarias':no_monetarias,
             'lineasRedondeo':auto_rounding,
-            'totalesXML':{'neto':str(sum((cents(source['totales'].get(k,'0')) for k in ('netoMin','netoBas','noGravado','exento')),Decimal(0))),
+            'totalesXML':{'neto':str(sum((cents(source['totales'].get(k,'0')) for k in ('netoMin','netoBas','noGravado','exento','suspenso','impuestoPercibido')),Decimal(0))),
                           'iva':str(cents(source['totales']['ivaMin'])+cents(source['totales']['ivaBas'])),
                           'total':source['totales']['total']},
             'lineas':result,'totales':{**{k:str(v) for k,v in expectations.items()},'noGravado':str(bases['1'])},
             'total':source['totales']['total'],'guardar_habilitado':False,
             'pendiente':'Validar selección contable y redondeo de Zeta por formulario. Requiere autorización antes de guardar factura real.'}
+    if adjustment:
+        amount=decimal_value(adjustment['monto'])
+        result.append(dict(target,esRedondeo=True,origenes=adjustment['origenes'],indicadorIVA='1',ivaZeta='1',
+                           descripcionXML='Redondeo',cantidadXML='1',montoXML=str(amount),
+                           netoPropuesto5Decimales=str(amount.quantize(PRECISION)),
+                           baseEsperada=str(amount),ivaEsperado='0.00',totalEsperado=str(amount)))
+        plan['ajusteRedondeo']=adjustment
+        plan['totalesZeta']={**plan['totalesXML'],
+                           'neto':str(decimal_value(plan['totalesXML']['neto'])+amount),
+                           'total':str(cents(source['totales']['pagar']))}
+    return plan

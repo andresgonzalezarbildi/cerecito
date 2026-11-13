@@ -97,7 +97,7 @@ class WorkflowTests(unittest.TestCase):
         queue=json.loads((self.directory/'salida/cola.json').read_text())
         self.assertEqual(queue['origenZeta'],['a.xlsx','b.xlsx'])
 
-    def test_zip_reimport_keeps_choices_and_rechecks_duplicates(self):
+    def test_zip_reimport_keeps_choices_and_known_confirmations(self):
         self.choose()
         self.store.decide(self.key,{'skip':True,'center':'C1','reviewed':True})
         jobs=Jobs(self.store,lambda payload,save,progress,cancelled:0)
@@ -112,9 +112,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(invoice['decision']['lines']['0'],{'kind':'article','code':'A1'})
         self.assertEqual(invoice['decision']['center'],'C1')
         self.assertTrue(invoice['decision']['skip'])
-        self.assertEqual(invoice['duplicate_state'],'unchecked')
-        self.assertEqual(invoice['state'],'skipped')
-        self.assertIsNone(invoice['last_result'])
+        self.assertEqual(invoice['duplicate_state'],'existing')
+        self.assertEqual(invoice['state'],'loaded')
+        self.assertEqual(invoice['last_result']['estado'],'CONFIRMADO')
 
     def test_learned_article_applies_after_new_zip_and_restart(self):
         self.store.decide(self.key,{'lines':{'0':{'kind':'article','code':'A1'}}},learn_lines=True)
@@ -202,9 +202,84 @@ class WorkflowTests(unittest.TestCase):
     def test_special_indicator_12_never_treated_as_12_percent(self):
         self.store.import_documents('suspenso.xml',xml(349,indicator='12'))
         invoice=self.store.invoices()[0]
-        self.assertEqual(invoice['state'],'manual')
+        self.assertEqual(invoice['state'],'needs_review')
         self.assertIn('IVA en suspenso',' '.join(invoice['reasons']))
         self.assertEqual(invoice['payload']['lineas'],[])
+
+    def test_perceived_tax_group_is_loadable_without_adding_vat(self):
+        from cargar_lote import plan_for
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Carne impuesto percibido</NomItem><IndFact>11</IndFact><MontoItem>60</MontoItem><Cantidad>2</Cantidad></Item>'
+        raw=xml(651,'170',indicator='2',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',
+            b'<MntNetoIvaTasaMin>100</MntNetoIvaTasaMin><MntIVATasaMin>10</MntIVATasaMin><MntImpuestoPerc>60</MntImpuestoPerc>')
+        self.store.import_documents('perceived.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{str(i):{'kind':'concept','code':'G1'} for i in (0,1)}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        self.assertTrue(invoice['payload']['agruparPorIVA'])
+        group=next(line for line in invoice['plan']['lineas'] if line['indicadorIVA']=='11')
+        self.assertEqual((group['ivaZeta'],group['baseEsperada'],group['ivaEsperado']),('1','60.00','0.00'))
+        self.assertEqual(invoice['plan']['totalesXML'],{'neto':'160.00','iva':'10.00','total':'170'})
+        with patch('cargar_lote.company_rut',return_value=COMPANY):
+            _,plan,_=plan_for(invoice['payload'],invoice['source'])
+        self.assertEqual(plan['diferenciasRedondeoPrevistas'],{})
+        self.store.decide(key,{'groupByVat':False})
+        self.assertEqual(self.store.invoices()[0]['state'],'needs_review')
+        self.assertIn('Agrupá por IVA',' '.join(self.store.invoices()[0]['reasons']))
+        self.store.decide(key,{'groupByVat':True,'lines':{'1':{'kind':'concept','code':'G1','ivaZeta':'3'}}})
+        self.assertIn('cambia el impuesto',' '.join(self.store.invoices()[0]['reasons']))
+
+    def test_perceived_tax_header_and_original_lines_must_match(self):
+        raw=xml(652,'60',indicator='11').replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntImpuestoPerc>60</MntImpuestoPerc>')
+        self.store.import_documents('bad-perceived.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertIsNone(invoice['plan'])
+        self.assertIn('impuesto percibido no reproduce',' '.join(invoice['reasons']))
+
+    def test_empty_global_discount_container_does_not_force_manual_load(self):
+        raw=xml(653).replace(b'</eFact>',b'<DscRcgGlobal>  </DscRcgGlobal></eFact>')
+        self.store.import_documents('empty-discount.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+        # Refrescar un lote importado con la detección anterior conserva elecciones.
+        with self.store.connect() as db:
+            source=json.loads(db.execute('SELECT source FROM invoices WHERE key=?',(key,)).fetchone()[0])
+            source['ajustesGlobales']=True
+            db.execute('UPDATE invoices SET source=? WHERE key=?',(json.dumps(source),key))
+        self.store.import_documents('empty-discount.xml',raw)
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+        self.assertEqual(self.store.invoices()[0]['decision']['lines']['0']['code'],'A1')
+        real=raw.replace(b'<DscRcgGlobal>  </DscRcgGlobal>',b'<DscRcgGlobal><DRG_Item><ValorDR>10</ValorDR></DRG_Item></DscRcgGlobal>')
+        self.store.import_documents('real-discount.xml',real.replace(b'<Nro>653',b'<Nro>654'))
+        self.assertEqual(self.store.invoices()[0]['state'],'manual')
+
+    def test_manual_purchases_can_be_checked_for_duplicates_without_becoming_loadable(self):
+        buffer=io.BytesIO()
+        with ZipFile(buffer,'w') as archive:
+            for number in (625,626):
+                archive.writestr(f'{number}.xml',xml(number,indicator='16'))
+        batch=self.store.import_documents('manual.zip',buffer.getvalue())
+        self.assertTrue(all(i['state']=='manual' and i['can_precheck'] for i in self.store.invoices()))
+        def runner(payload,save,progress,cancelled):
+            self.assertFalse(save)
+            self.assertTrue(payload['duplicates_only'])
+            for invoice in payload['comprobantes']:
+                status='RESULTADOS_EN_ZETA_NO_CARGAR' if invoice['cfe']['numero']=='625' else 'AUSENTE_VERIFICADO'
+                progress({'clave':invoice['clave'],'estado':status})
+            return 0
+        jobs=Jobs(self.store,runner)
+        jobs.start('manual-reset',precheck=True,reset_batch=batch['date'])
+        deadline=time.monotonic()+3
+        while jobs.list()[0]['status'] in {'queued','running'} and time.monotonic()<deadline:time.sleep(.01)
+        self.assertEqual(jobs.list()[0]['status'],'finished')
+        self.assertEqual(jobs.list()[0]['data']['done'],2)
+        self.assertEqual({i['source']['numero']:i['state'] for i in self.store.invoices()},
+                         {'625':'existing','626':'manual'})
+        with self.assertRaises(ValueError):
+            jobs.start('manual-save',save=True)
 
     def test_existing_invoice_does_not_hide_pending_load_error(self):
         self.store.import_documents('second.xml',xml(68))
@@ -350,7 +425,8 @@ class WorkflowTests(unittest.TestCase):
                 self.store.import_documents('zero.xml',xml(number,extra=extra))
                 key=self.store.invoices()[0]['key']
                 self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
-                self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
+                self.assertEqual(self.store.invoices()[0]['state'],'ready')
+                self.assertEqual(self.store.invoices()[0]['auto_ignored_lines'],[1])
                 self.store.decide(key,{'lines':{'1':{'ignore':True}}})
                 invoice=Store(self.directory).invoices()[0]
                 self.assertEqual(invoice['state'],'ready')
@@ -381,9 +457,168 @@ class WorkflowTests(unittest.TestCase):
         grouped=allow_rounding(invoice['plan'])['lineas']
         self.assertEqual([(l['origenes'],l['cantidadXML'],l['totalEsperado']) for l in grouped],
                          [([0],'1','100.00'),([1,2],'1','55.00'),([3,4],'1','122.00')])
+        self.assertEqual(grouped[2]['descripcionXML'],'Artículo 22%')
         self.assertEqual(len(invoice['payload']['lineas']),5)
         self.store.decide(key,{'groupByVat':False})
         self.assertEqual(len(self.store.invoices()[0]['plan']['lineas']),5)
+
+    def test_zero_collection_is_skipped_without_choices_or_supplier(self):
+        from xml_source import is_zero_collection, preview_net_lines, SourceError
+        raw=xml(640,'0',indicator='6').replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntPagar>100</MntPagar>')
+        self.store.import_documents('collection.xml',raw)
+        invoice=self.store.invoices()[0]
+        self.assertTrue(is_zero_collection(invoice['source']))
+        self.assertEqual(invoice['state'],'skipped')
+        self.assertFalse(invoice['can_precheck'])
+        self.assertTrue(invoice['auto_collection'])
+        with self.assertRaisesRegex(SourceError,'Cobranza'):
+            preview_net_lines(invoice['source'],invoice['payload'],COMPANY)
+        self.store.decide(invoice['key'],{'skip':False,'reviewed':True})
+        self.assertEqual(Store(self.directory).invoices()[0]['state'],'skipped')
+        # Un total cero por compensación de productos conserva su revisión.
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Descuento</NomItem><IndFact>1</IndFact><MontoItem>-100</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=xml(641,'0',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntNoGrv>0</MntNoGrv>')
+        self.store.import_documents('zero-purchase.xml',raw)
+        invoice=self.store.invoices()[0]
+        self.assertFalse(invoice['auto_collection'])
+        self.assertNotEqual(invoice['state'],'skipped')
+
+    def test_reimport_keeps_confirmed_xml_out_of_review_and_precheck(self):
+        buffer=io.BytesIO()
+        with ZipFile(buffer,'w') as archive:archive.writestr('invoice.xml',xml(650))
+        batch=self.store.import_documents('same.zip',buffer.getvalue())
+        invoice=self.store.invoices()[0]
+        with self.store.connect() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)',('loaded',COMPANY,'finished','{}',batch['date']))
+            item={'estado':'CONFIRMADO','source_hash':invoice['source']['sha256CFE'],'supplier_code':'P1'}
+            db.execute('INSERT INTO attempts(job,key,data,created) VALUES(?,?,?,?)',
+                       ('loaded',invoice['key'],json.dumps(item),batch['date']))
+        self.store.import_documents('same.zip',buffer.getvalue())
+        current=self.store.invoices()[0]
+        self.assertEqual(current['state'],'loaded')
+        self.assertFalse(current['can_precheck'])
+        self.store.reset_review(self.store.settings()['batch']['date'])
+        self.assertEqual(Store(self.directory).invoices()[0]['state'],'loaded')
+
+    def test_zero_line_can_be_included_and_loaded_after_restart(self):
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Regalo</NomItem><IndFact>1</IndFact><MontoItem>0</MontoItem><Cantidad>1</Cantidad></Item>'
+        self.store.import_documents('zero.xml',xml(642,extra=extra))
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+        self.store.decide(key,{'lines':{'1':{'ignore':False}}})
+        self.store.decide(key,{'lines':{'1':{'kind':'article','code':'A1'}}})
+        invoice=Store(self.directory).invoices()[0]
+        self.assertIs(invoice['decision']['lines']['1']['ignore'],False)
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['plan']['lineasIgnoradas'],[])
+        self.assertEqual(invoice['plan']['lineas'][1]['totalEsperado'],'0.00')
+        self.store.decide(key,{'lines':{'1':{'ignore':True}}})
+        self.assertEqual(self.store.invoices()[0]['plan']['lineasIgnoradas'],[1])
+
+    def test_grouped_vat_defaults_to_xml_despite_destination_vat_and_is_editable(self):
+        from cargar_lote import allow_rounding
+        raw=xml(643,'122',indicator='3').replace(b'<MntNoGrv>100</MntNoGrv>',
+            b'<MntNetoIVATasaBasica>100</MntNetoIVATasaBasica><MntIVATasaBasica>22</MntIVATasaBasica>')
+        self.store.import_documents('tax.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'concept','code':'G1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['payload']['lineas'][0]['ivaZeta'],'3')
+        self.assertEqual(allow_rounding(invoice['plan'])['lineas'][0]['ivaEsperado'],'22.00')
+        self.store.decide(key,{'lines':{'0':{'kind':'concept','code':'G1','ivaZeta':'1'}}})
+        self.assertIn('cambia el impuesto',' '.join(self.store.invoices()[0]['reasons']))
+        self.store.decide(key,{'lines':{'0':{'kind':'concept','code':'G1','ivaZeta':'3'}}})
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+
+    def test_negative_lines_are_deducted_in_their_vat_group_with_exact_totals(self):
+        from cargar_lote import allow_rounding, plan_for
+        from decimal import Decimal
+        for number, gross, amount, negative in [(644,False,'100','-10'),(645,True,'122','-12.2')]:
+            extra=f'<Item><NroLinDet>2</NroLinDet><NomItem>Descuento</NomItem><IndFact>3</IndFact><MontoItem>{negative}</MontoItem><Cantidad>-1</Cantidad></Item>'
+            raw=xml(number,'109.8',indicator='3',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',
+                b'<MntNetoIVATasaBasica>90</MntNetoIVATasaBasica><MntIVATasaBasica>19.8</MntIVATasaBasica>')
+            raw=raw.replace(b'<MontoItem>100</MontoItem>',f'<MontoItem>{amount}</MontoItem>'.encode())
+            if gross:raw=raw.replace(b'</IdDoc>',b'<MntBruto>1</MntBruto></IdDoc>')
+            self.store.import_documents('discount.xml',raw)
+            key=self.store.invoices()[0]['key']
+            self.store.decide(key,{'mode':'credit','lines':{str(i):{'kind':'article','code':'A1'} for i in (0,1)}})
+            invoice=Store(self.directory).invoices()[0]
+            self.assertEqual(invoice['state'],'ready')
+            self.assertTrue(invoice['payload']['agruparPorIVA'])
+            plan=allow_rounding(invoice['plan'])
+            line=plan['lineas'][0]
+            self.assertEqual(line['origenes'],[0,1])
+            self.assertEqual((line['baseEsperada'],line['ivaEsperado'],line['totalEsperado']),('90.00','19.80','109.80'))
+            self.assertEqual(line['cantidadXML'],'1')
+            with patch('cargar_lote.company_rut',return_value=COMPANY):
+                _,engine_plan,_=plan_for(invoice['payload'],invoice['source'])
+            self.assertEqual(Decimal(engine_plan['lineas'][0]['totalEsperado']),Decimal('109.80'))
+            self.store.decide(key,{'groupByVat':False,'lines':{str(i):{'kind':'article','code':'A1','ivaZeta':'3'} for i in (0,1)}})
+            self.assertIn('Agrupá por IVA',' '.join(self.store.invoices()[0]['reasons']))
+
+    def test_grouped_suspended_vat_requires_its_own_destination_and_balanced_totals(self):
+        self.store.import_catalog([{'kind':'article','code':'S','name':'ALIMENTOS IVA en suspenso','vat':'12'}])
+        raw=xml(628,indicator='12').replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntIVaenSusp>100</MntIVaenSusp>')
+        for number, payable in [(628,b'100'),(629,b'99.75')]:
+            content=raw.replace(b'<Nro>628</Nro>',f'<Nro>{number}</Nro>'.encode())
+            content=content.replace(b'</Totales>',b'<MntPagar>'+payable+b'</MntPagar></Totales>')
+            self.store.import_documents('suspenso.xml',content)
+            key=self.store.invoices()[0]['key']
+            self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'article','code':'A1'}}})
+            self.assertEqual(self.store.invoices()[0]['payload']['lineas'][0]['ivaZeta'],'1')
+            self.store.decide(key,{'lines':{'0':{'kind':'article','code':'S'}}})
+            invoice=self.store.invoices()[0]
+            if number==629:
+                self.assertIn('ajuste por separado',' '.join(invoice['reasons']))
+            else:
+                self.assertEqual(invoice['state'],'ready')
+                self.assertEqual(invoice['plan']['lineas'][0]['descripcionXML'],'Alimentos IVA en suspenso')
+                self.assertEqual(invoice['plan']['totalesXML'],{'neto':'100.00','iva':'0.00','total':'100'})
+
+    def test_manual_zeta_iva_is_independent_of_concept_and_preserves_xml_tax(self):
+        self.store.import_catalog([{'kind':'concept','code':'M','name':'Mantenimiento','vat':'3'}])
+        self.store.decide(self.key,{'mode':'credit','lines':{'0':{'kind':'concept','code':'M','ivaZeta':'1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['payload']['lineas'][0]['ivaZeta'],'1')
+        self.assertEqual(invoice['plan']['lineas'][0]['ivaEsperado'],'0.00')
+        self.store.decide(self.key,{'lines':{'0':{'kind':'concept','code':'M','ivaZeta':'3'}}})
+        self.assertIn('cambia el impuesto del XML',' '.join(self.store.invoices()[0]['reasons']))
+
+    def test_suspended_group_can_use_an_exempt_destination_with_explicit_zero(self):
+        raw=xml(630,indicator='12').replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntIVaenSusp>100</MntIVaenSusp>')
+        self.store.import_documents('suspenso.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'article','code':'A1','ivaZeta':'1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        line=invoice['plan']['lineas'][0]
+        self.assertEqual((line['indicadorIVA'],line['ivaZeta'],line['totalEsperado']),('12','1','100.00'))
+
+    def test_grouped_rounding_is_a_separate_signed_line_with_its_own_destination(self):
+        from decimal import Decimal
+        from cargar_lote import allow_rounding
+        from zeta_compras import input_price
+        self.store.import_catalog([{'kind':'article','code':'R','name':'Redondeo','vat':'1'}])
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo</NomItem><IndFact>7</IndFact><MontoItem>0.25</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=xml(631,extra=extra).replace(b'</Totales>',b'<MntPagar>99.75</MntPagar></Totales>')
+        self.store.import_documents('redondeo.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'article','code':'A1'}}})
+        pending=self.store.invoices()[0]
+        self.assertEqual(pending['rounding_adjustment'],{'monto':'-0.25','origenes':[1]})
+        self.assertIn('Elegí el destino del redondeo',' '.join(pending['reasons']))
+        self.store.decide(key,{'roundingDestination':{'kind':'article','code':'R'}})
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        plan=allow_rounding(invoice['plan'])
+        self.assertEqual(plan['totalesXML']['total'],'100')
+        self.assertEqual(plan['totalesZeta']['total'],'99.75')
+        line=plan['lineas'][-1]
+        self.assertEqual((line['codigoZeta'],line['ivaZeta'],line['origenes']),('R','1',[1]))
+        self.assertEqual(input_price(line,'S'),Decimal('-0.25'))
 
     def test_non_billable_rounding_can_be_ignored_with_origin(self):
         extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo sintético</NomItem><IndFact>6</IndFact><MontoItem>0.01</MontoItem><Cantidad>1</Cantidad></Item>'
@@ -423,6 +658,55 @@ class WorkflowTests(unittest.TestCase):
         invoice=next(i for i in Store(self.directory).invoices() if i['source']['numero']=='68')
         self.assertEqual(invoice['payload']['proveedor']['codigoZeta'],'P1')
         self.assertFalse(any('relación' in r for r in invoice['reasons']))
+
+    def test_live_blank_rut_requires_confirmation_even_when_cached_rut_is_present(self):
+        from zeta_compras import validate_supplier_catalog
+        self.choose()
+        invoice=self.store.invoices()[0]
+        self.assertEqual(next(c for c in self.store.catalog() if c['code']=='P1')['rut'],SUPPLIER)
+        result={'estado':'BLOQUEADO_CONFIRMACION_PROVEEDOR','source_hash':invoice['source']['sha256CFE'],
+                'supplier_code':'P1','proveedor_zeta':{'codigoZeta':'P1','rut':'','nombre':'Nombre real en Zeta'}}
+        stamp=self.store.settings()['batch']['date']
+        with self.store.connect() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)',('blank-rut',COMPANY,'finished','{}',stamp))
+            db.execute('INSERT INTO attempts(job,key,data,created) VALUES(?,?,?,?)',
+                       ('blank-rut',self.key,json.dumps(result),stamp))
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['state'],'needs_review')
+        self.assertTrue(invoice['supplier_confirmation_required'])
+        self.assertIn('RUT vacío en Zeta',' '.join(invoice['reasons']))
+        # La búsqueda de duplicados puede terminar sin volver a consultar el RUT del proveedor.
+        with self.store.connect() as db:
+            absence={'estado':'AUSENTE_VERIFICADO','source_hash':invoice['source']['sha256CFE'],'supplier_code':'P1'}
+            db.execute('INSERT INTO attempts(job,key,data,created) VALUES(?,?,?,?)',
+                       ('blank-rut',self.key,json.dumps(absence),stamp))
+        self.assertTrue(self.store.invoices()[0]['supplier_confirmation_required'])
+        self.assertEqual(self.store.invoices()[0]['last_result']['estado'],'AUSENTE_VERIFICADO')
+        self.store.approve_supplier(self.key,'P1')
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        self.assertFalse(invoice['supplier_confirmation_required'])
+        config=json.loads((self.directory/'configuracion_zeta.json').read_text())
+        approval=config['correlaciones_proveedor_confirmadas']
+        self.assertEqual(approval[SUPPLIER]['nombreZeta'],'Nombre real en Zeta')
+        self.store.import_documents('next.xml',xml(881))
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['payload']['proveedor']['codigoZeta'],'P1')
+        self.assertNotIn('seleccionManual',invoice['payload']['proveedor'])
+        validate_supplier_catalog(invoice['payload']['proveedor'],result['proveedor_zeta'],approval)
+
+    def test_stale_live_identity_cannot_override_a_populated_catalog_rut(self):
+        self.choose()
+        result={'estado':'BLOQUEADO_CONFIRMACION_PROVEEDOR','source_hash':'different-source',
+                'supplier_code':'P1','proveedor_zeta':{'codigoZeta':'P1','rut':'','nombre':'Nombre real'}}
+        stamp=self.store.settings()['batch']['date']
+        with self.store.connect() as db:
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?)',('stale-identity',COMPANY,'finished','{}',stamp))
+            db.execute('INSERT INTO attempts(job,key,data,created) VALUES(?,?,?,?)',
+                       ('stale-identity',self.key,json.dumps(result),stamp))
+        self.assertFalse(self.store.invoices()[0]['supplier_confirmation_required'])
+        with self.assertRaisesRegex(ValueError,'RUT vacío'):
+            self.store.approve_supplier(self.key,'P1')
 
     def test_valid_manual_center_is_not_overridden(self):
         self.choose()

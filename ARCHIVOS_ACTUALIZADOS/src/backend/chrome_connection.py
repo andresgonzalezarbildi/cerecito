@@ -1,0 +1,175 @@
+"""Conexión a Chrome; apertura automática del perfil exclusivo de Cerecito."""
+from __future__ import annotations
+
+from runtime_paths import DATA_DIR, CODE_DIR, APP_DIR, APP_URL, company_rut, control_value, category_provider_rut
+
+import json
+import os
+import re
+import time
+import atexit
+from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import build_opener, ProxyHandler
+
+from playwright.sync_api import Error as PlaywrightError
+from cdp_transport import list_targets, ScopedCDP
+
+
+class ChromeError(RuntimeError):
+    pass
+
+
+def endpoint_from_input(text):
+    text = text.strip().replace('Server running at:', '').strip()
+    if text.isdigit():
+        text = 'http://127.0.0.1:' + text
+    if re.fullmatch(r'(?:localhost|127\.0\.0\.1):\d+', text):
+        text = 'http://' + text
+    parsed = urlparse(text)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if (parsed.scheme not in {'http', 'ws'} or parsed.hostname not in {'localhost', '127.0.0.1', '::1'}
+            or not port or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        raise ChromeError('Usá solamente un puerto o una dirección local de depuración de Chrome.')
+    if parsed.scheme == 'ws' and not parsed.path.startswith('/devtools/browser'):
+        raise ChromeError('La dirección WebSocket debe apuntar a /devtools/browser.')
+    return text
+
+
+def websocket_endpoint(endpoint):
+    endpoint = endpoint_from_input(endpoint)
+    if endpoint.startswith('ws:'):
+        return endpoint
+    parsed = urlparse(endpoint)
+    origin = f'{parsed.scheme}://{parsed.netloc}'
+    # Chrome iniciado con --remote-debugging-port publica /json/version.
+    # Chrome con chrome://inspect no lo publica: usa /devtools/browser.
+    opener = build_opener(ProxyHandler({}))
+    try:
+        with opener.open(origin + '/json/version', timeout=2) as response:
+            data = json.load(response)
+        return endpoint_from_input(data['webSocketDebuggerUrl'])
+    except HTTPError as exc:
+        if exc.code != 404:
+            raise ChromeError(f'Chrome respondió HTTP {exc.code}.') from exc
+        return f'ws://{parsed.netloc}/devtools/browser'
+    except (URLError, OSError, ValueError, KeyError) as exc:
+        raise ChromeError('No responde Chrome. Revisá el puerto en chrome://inspect/#remote-debugging.') from exc
+
+
+def restore_default_downloads(connection):
+    """Restaurar el comportamiento nativo que una conexión anterior pudo sustituir."""
+    connection.send_json({'id':2,'method':'Browser.setDownloadBehavior','params':{'behavior':'default'}})
+    while True:
+        response=connection.receive()
+        if response.get('id')==2:
+            if 'error' in response:
+                raise ChromeError('Chrome no permitió restaurar sus descargas. Cerrá el Chrome de Cerecito y volvé a abrirlo.')
+            return
+
+
+def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False):
+    config = config or {}
+    endpoint = endpoint or os.environ.get('CERECITO_CHROME_ENDPOINT') or config.get('chrome', {}).get('endpoint') or 'http://127.0.0.1:9222'
+    managed=endpoint.rstrip('/') == 'http://127.0.0.1:9223'
+    if managed:
+        from abrir_chrome_bot import main as open_bot
+        open_bot()
+    endpoint = websocket_endpoint(endpoint)
+    print('Conectando al Chrome configurado:', endpoint, flush=True)
+    if endpoint.endswith('/devtools/browser'):
+        print('Si Chrome pide permiso de depuración, aceptalo.', flush=True)
+    bridge = None
+    upstream = None
+    try:
+        # Una pestaña ajena congelada puede bloquear la inicialización de CDP.
+        # Enumerar targets desde el proceso del navegador no toca sus renderers.
+        all_targets, upstream = list_targets(endpoint, keep_connection=True)
+        targets = [t for t in all_targets if t['type'] == 'page']
+        configured = config.get('url', '')
+        host = urlparse(configured).hostname if configured.startswith('https://') else None
+        candidates = [t for t in targets if (urlparse(t['url']).hostname == host if host else 'zeta' in (t['url'] + ' ' + t['title']).lower())]
+        target_file=DATA_DIR/'estado/chrome_target.json'
+        pinned=json.loads(target_file.read_text(encoding='utf-8')).get('target_id') if target_file.exists() else None
+        pinned_candidates=[t for t in candidates if t['targetId']==pinned]
+        if len(pinned_candidates)==1:candidates=pinned_candidates
+        if len(candidates)>1 and urlparse(configured).path.startswith('/z.gestion.comprobantes.'):
+            purchases=[t for t in candidates if urlparse(t['url']).path=='/z.gestion.comprobantes.compras']
+            if len(purchases)==1:candidates=purchases
+            else:
+                workflow_pages=[t for t in candidates if urlparse(t['url']).path in {'/z.gestion.comprobantes.facturaproveedor','/z.gestion.comprobantes.facturacompra','/z.gestion.comprobantes.lineacompras','/z.gestion.comprobantes.lineagastos','/z.gestion.comprobantes.egresoscajafp'}]
+                if len(workflow_pages)==1:candidates=workflow_pages
+                configured_pages=[t for t in candidates if urlparse(t['url']).path==urlparse(configured).path]
+                if len(configured_pages)==1:candidates=configured_pages
+        if len(candidates) != 1:
+            if not interactive:
+                raise ChromeError(f'Hay {len(candidates)} pestañas de Zeta identificables. No se elige otra automáticamente.')
+            for i, target in enumerate(targets, 1):
+                print(f"{i}. {target['title']} | {target['url'].split('?', 1)[0]}")
+            answer = input('Número de pestaña de Zeta: ').strip()
+            if not answer.isdigit() or not 1 <= int(answer) <= len(targets):
+                raise ChromeError('Número de pestaña inválido.')
+            chosen = targets[int(answer) - 1]
+        else:
+          chosen = candidates[0]
+        target_file.parent.mkdir(parents=True,exist_ok=True)
+        target_file.write_text(json.dumps({'target_id':chosen['targetId']}),encoding='utf-8')
+        print('Pestaña seleccionada:', chosen['url'].split('?', 1)[0], flush=True)
+        if managed:restore_default_downloads(upstream)
+        bridge = ScopedCDP(endpoint, chosen['targetId'], initial_websocket=upstream)
+        endpoint = bridge.url
+        browser = playwright.chromium.connect_over_cdp(endpoint, no_defaults=True, timeout=45000)
+    except (PlaywrightError, OSError, ValueError, ChromeError) as exc:
+        if bridge:
+            bridge.close()
+        elif upstream:
+            upstream.close()
+        if isinstance(exc, ChromeError):
+            raise
+        raise ChromeError('Chrome no completó la conexión. Revisá el permiso de depuración y la dirección actual. No se reintenta ninguna operación.') from exc
+    atexit.register(bridge.close)
+    return browser
+
+
+def choose_page(browser, config=None, *, interactive=False):
+    config = config or {}
+    # No depender de contexts[0] ni pages[0]; Chrome puede anunciar targets tarde.
+    deadline = time.monotonic() + 5
+    pages = []
+    while time.monotonic() < deadline:
+        if not browser.is_connected():
+            raise ChromeError('Se perdió la conexión a Chrome. La operación queda detenida.')
+        pages = [p for c in browser.contexts for p in c.pages if not p.is_closed()]
+        if pages:
+            break
+        time.sleep(.1)
+    if not pages:
+        raise ChromeError('Chrome no expuso pestañas. Revisá el permiso de depuración y el perfil con Zeta abierto.')
+    configured = config.get('url', '')
+    host = urlparse(configured).hostname if configured.startswith('https://') else None
+    candidates = [p for p in pages if (urlparse(p.url).hostname == host if host else 'zeta' in p.url.lower())]
+    if len(candidates) == 1:
+        return candidates[0]
+    if not interactive:
+        raise ChromeError(f'Hay {len(candidates)} pestañas de Zeta; dejá una sola o ejecutá el capturador para elegirla.')
+    print('Elegí la pestaña de Zeta:')
+    for i, page in enumerate(pages, 1):
+        print(f'{i}. {page.url.split("?", 1)[0]}')
+    answer = input('Número: ').strip()
+    if not answer.isdigit() or not 1 <= int(answer) <= len(pages):
+        raise ChromeError('Número de pestaña inválido.')
+    return pages[int(answer) - 1]
+
+
+def locator_for(page, step):
+    root = page
+    for selector in step.get('frames', []):
+        iframe = root.locator(selector)
+        if iframe.count() != 1:
+            raise ChromeError(f'Iframe ambiguo o inexistente: {selector}')
+        root = root.frame_locator(selector)
+    return root.locator(step['selector'])

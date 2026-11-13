@@ -46,12 +46,12 @@ class Jobs:
                 return active['id']
             batch = self.store.reset_review(reset_batch) if reset_batch is not None else self.store.settings().get('batch',{})
             invoices = self.store.invoices()
-            ready = [i for i in invoices if i['state'] not in {'skipped','non_invoice','loaded','manual'}] if precheck else [i for i in invoices if i['state'] == 'ready']
+            ready = [i for i in invoices if i['can_precheck']] if precheck else [i for i in invoices if i['state'] == 'ready']
             if invoice_keys is not None:
                 if not precheck:raise ValueError('El filtro solo se admite para buscar existentes.')
                 ready=[i for i in ready if i['key'] in invoice_keys]
             if not ready:
-                if reset_batch is not None:return None
+                if reset_batch is not None or invoice_keys is not None:return None
                 if any(i['state'] in {'existing','loaded'} for i in invoices) and not any(i['state']=='needs_review' for i in invoices):raise ValueError('Las facturas ya fueron cargadas. Consultá los resultados.')
                 raise ValueError('No hay facturas listas para procesar. Abrí Revisar pendientes y completá proveedor, destino y forma de pago cuando corresponda.')
             payload = {'comprobantes': [i['payload'] for i in ready], 'duplicates_only': precheck,

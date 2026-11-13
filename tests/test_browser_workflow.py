@@ -73,7 +73,7 @@ class BrowserTests(unittest.TestCase):
                             page.get_by_role('button',name='Aplicar sector a toda la factura').click()
                             page.wait_for_function("state.invoices[0].state==='ready'")
                             page.get_by_role('button',name='Resumen',exact=True).click()
-                            page.get_by_role('button',name='Revisar pendientes',exact=True).click()
+                            page.get_by_role('button',name='Listos para cargar',exact=True).click()
                             page.wait_for_selector('.invoice-sheet')
                             self.assertEqual(page.locator('.invoice-sheet').count(),1)
                             self.assertEqual(page.locator('.invoice-sticky').evaluate("e=>getComputedStyle(e).position"),'sticky')

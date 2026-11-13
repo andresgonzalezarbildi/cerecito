@@ -164,6 +164,43 @@ class EngineBoundaryTests(unittest.TestCase):
             cargar_lote.apply_line_tax(page,{'indicadorIVA':'3','codigoZeta':'AL103'},{'destination':'article'})
             setter.assert_not_called()
 
+    def test_suspended_tax_requires_its_own_zeta_option(self):
+        page=MagicMock()
+        control=MagicMock()
+        options=MagicMock()
+        page.locator.side_effect=lambda selector:options if selector.endswith(' option') else control
+        options.evaluate_all.return_value=[{'value':'0','text':'Exento'}]
+        with self.assertRaisesRegex(ValueError,'opción inequívoca de IVA en suspenso'):
+            cargar_lote.apply_line_tax(page,{'indicadorIVA':'12'},{'destination':'article'})
+        control.select_option.assert_not_called()
+        options.evaluate_all.return_value.append({'value':'31','text':'31 - IVA en suspenso'})
+        control.input_value.side_effect=['0','31']
+        control.evaluate.return_value='31 - IVA en suspenso'
+        with patch.object(cargar_lote,'wait_value'):
+            cargar_lote.apply_line_tax(page,{'indicadorIVA':'12'},{'destination':'article'})
+        control.select_option.assert_called_once_with(value='31',timeout=5000)
+
+    def test_grouped_total_requires_exact_match_even_if_the_model_would_accept_it(self):
+        actual, expected={'total':'100.01'}, {'total':'100.00'}
+        with self.assertRaisesRegex(ValueError,'al centésimo'):
+            cargar_lote.rounding_differences(actual,expected,rounding_model=actual,exact=True)
+
+    def test_manual_tax_uses_the_zeta_options_for_the_destination_type(self):
+        options=[{'value':str(value),'text':label} for value,label in enumerate(
+            ['-','1 - IVA 10%','2 - IVA 22%','3 - IVA 10% Gastos','4 - IVA 22% Gastos'])]
+        for indicator,choice,kind,value in [('11','1','article','0'),('11','1','concept','0'),('12','1','concept','0'),('2','2','article','1'),('3','3','concept','4')]:
+            with self.subTest(indicator=indicator,kind=kind):
+                page=MagicMock()
+                control=MagicMock()
+                option_list=MagicMock()
+                page.locator.side_effect=lambda selector:option_list if selector.endswith(' option') else control
+                option_list.evaluate_all.return_value=options
+                control.input_value.side_effect=['unused',value]
+                control.evaluate.return_value=options[int(value)]['text']
+                with patch.object(cargar_lote,'wait_value'):
+                    cargar_lote.apply_line_tax(page,{'indicadorIVA':indicator,'ivaZeta':choice},{'destination':kind})
+                control.select_option.assert_called_once_with(value=value,timeout=5000)
+
     def test_article_tax_disagrees_with_xml_even_if_zeta_id_used_to_match(self):
         page=MagicMock()
         page.locator.return_value.evaluate.return_value={'value':'2','label':'2 - IVA 10%'}

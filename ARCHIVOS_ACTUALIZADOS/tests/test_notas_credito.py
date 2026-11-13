@@ -73,6 +73,51 @@ class CreditNoteTests(unittest.TestCase):
         self.assertIn('sin referencia fiscal',' '.join(invoice['reasons']))
         self.assertTrue(invoice_issues(invoice['payload']))
 
+    def test_canonical_nested_reference_reads_number_without_empty_container(self):
+        raw=note().replace(b'NroDocRef',b'NroCFERef')
+        start=raw.index(b'<Referencia>');end=raw.index(b'</Referencia>')+len(b'</Referencia>')
+        raw=raw[:start]+b'<Referencia>'+raw[start:end]+b'</Referencia>'+raw[end:]
+        invoice=self.load(raw)
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['source']['numero'],'501')
+        self.assertEqual(invoice['source']['referencias'],[{'tipo':'111','serie':'A','numero':'22','global':'','motivo':''}])
+        with self.store.connect() as db:
+            source=dict(invoice['source'],referencias=[{'tipo':'111','serie':'A','numero':'','global':'','motivo':''}])
+            import json
+            db.execute('UPDATE invoices SET source=? WHERE key=?',(json.dumps(source),invoice['key']))
+        self.store.import_documents('note.xml',raw)
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+        self.assertEqual(self.store.invoices()[0]['payload']['referencias'][0]['numero'],'22')
+
+    def test_contradictory_reference_numbers_are_rejected(self):
+        raw=note().replace(b'</NroDocRef>',b'</NroDocRef><NroCFERef>23</NroCFERef>')
+        with self.assertRaisesRegex(ValueError,'contradictorios'):
+            self.store.import_documents('bad-reference.xml',raw)
+
+    def test_note_with_canonical_reference_and_negative_payable_rounding(self):
+        self.store.import_catalog([{'kind':'article','code':'A22','name':'Bebidas 22%','vat':'3'},
+                                   {'kind':'article','code':'R','name':'Redondeo','vat':'1'}])
+        values=[('4754.46','12'),('5732.82','2'),('3840.00','6'),('2652.06','6')]
+        items=''.join(f'<Item><NroLinDet>{index+1}</NroLinDet><NomItem>Bebida</NomItem><IndFact>3</IndFact><MontoItem>{amount}</MontoItem><Cantidad>{quantity}</Cantidad></Item>' for index,(amount,quantity) in enumerate(values))
+        items+='<Item><NroLinDet>5</NroLinDet><NomItem>Redondeo</NomItem><IndFact>7</IndFact><MontoItem>0.34</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=note(29757,total='16979.34').replace(b'NroDocRef',b'NroCFERef')
+        raw=raw.replace(b'</IdDoc>',b'<MntBruto>1</MntBruto></IdDoc>')
+        raw=raw.replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntNetoIVATasaBasica>13917.49</MntNetoIVATasaBasica><MntIVATasaBasica>3061.85</MntIVATasaBasica><MntPagar>16979</MntPagar>')
+        start=raw.index(b'<Detalle>');end=raw.index(b'</Detalle>')+len(b'</Detalle>')
+        raw=raw[:start]+b'<Detalle>'+items.encode()+b'</Detalle>'+raw[end:]
+        self.store.import_documents('round-note.xml',raw)
+        invoice=self.store.invoices()[0]
+        self.store.decide(invoice['key'],{'groupByVat':True,'roundingDestination':{'kind':'article','code':'R'},
+                                         'lines':{str(index):{'kind':'article','code':'A22'} for index in range(4)}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready',invoice['reasons'])
+        with patch('cargar_lote.company_rut',return_value=COMPANY):
+            _,plan,profile=plan_for(invoice['payload'],invoice['source'])
+        self.assertTrue(profile['credit_note'])
+        self.assertEqual(plan['totalesXML']['total'],'16979.34')
+        self.assertEqual(plan['totalesZeta']['total'],'16979.00')
+        self.assertEqual(plan['lineas'][-1]['totalEsperado'],'-0.34')
+
     def test_cash_note_stays_blocked_until_inflow_adapter_validated(self):
         self.store.import_documents('cash.xml',note(503,form_payment='1'))
         invoice=self.store.invoices()[0]

@@ -5,12 +5,14 @@ import io
 import json
 import sqlite3
 import re
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from xml_source import (read_zip_documents, read_xml_documents, preview_net_lines, non_monetary_line_indices,
-                        rounding_line_indices, valid_credit_note_reference, can_ignore_line, tax_breakdown, VAT_LABELS)
+                        rounding_line_indices, valid_credit_note_reference, can_ignore_line, tax_breakdown,
+                        validate_zeta_vat_choice, payable_rounding, zero_line_indices, is_zero_collection, VAT_LABELS)
 
 
 FINESA_RUT = '216450470015'
@@ -31,6 +33,34 @@ def now():
 
 def batch_revision(batch):
     return batch.get('reset_at') or batch.get('date')
+
+
+def catalog_heading(value):
+    text=''.join(c for c in unicodedata.normalize('NFD',str(value or '').casefold()) if not unicodedata.combining(c))
+    return ' '.join(text.strip().split())
+
+
+def detect_catalog_kind(filename,headers,labels):
+    def hints(text):
+        text=catalog_heading(text)
+        found=set()
+        if re.search(r'contact|proveedor',text):found.add('supplier')
+        if re.search(r'articulo|producto',text):found.add('article')
+        if re.search(r'concepto',text):found.add('concept')
+        return found
+    names={catalog_heading(name) for name in headers}
+    specific=set()
+    for label,kind in [('codigo proveedor','supplier'),('codigo articulo','article'),('codigo concepto','concept')]:
+        if label in names:specific.add(kind)
+    file_hints=hints(Path(filename).stem)
+    if len(file_hints|specific)==1:return (file_hints|specific).pop()
+    if file_hints or specific:
+        raise ValueError('El nombre y las columnas del archivo no identifican un único catálogo. Elegí el tipo para esta importación.')
+    label_hints=hints(' '.join(str(label or '') for label in labels))
+    if len(label_hints)==1:return label_hints.pop()
+    if not label_hints and names & {'rut','ruc','telefono','telefono 1','email','correo electronico'}:
+        return 'supplier'
+    raise ValueError('No pude reconocer si el archivo es de proveedores, artículos o conceptos. Elegí el tipo para esta importación.')
 
 
 class Store:
@@ -98,6 +128,8 @@ class Store:
                     for r in db.execute('SELECT * FROM catalog WHERE company=?', (self.company(),))]
 
     def preview_catalog(self, filename, content, kind=None):
+        labels=[]
+        headers=[]
         if filename.lower().endswith('.json'):
             rows = json.loads(content.decode('utf-8-sig'))
             rows = rows.get('catalog', rows.get('rows', [])) if isinstance(rows, dict) else rows
@@ -109,13 +141,15 @@ class Store:
             workbook=load_workbook(io.BytesIO(content),read_only=True,data_only=True)
             try:
                 sheet=workbook.active
+                labels.append(sheet.title)
                 values=iter(sheet.iter_rows())
                 headers=None
                 for position,cells in enumerate(values,1):
                     names=[heading(c.value) for c in cells]
-                    if ({'code','codigo','codigo zeta'} & set(names)) and ({'name','nombre','descripcion','razon social'} & set(names)):
+                    if ({'code','codigo','codigo zeta','cod','codigo articulo','codigo concepto','codigo proveedor'} & set(names)) and ({'name','nombre','descripcion','razon social','denominacion','articulo','concepto'} & set(names)):
                         headers=[c.value for c in cells]
                         break
+                    labels.extend(c.value for c in cells if c.value is not None)
                     if position>=40:break
                 if headers is None:raise ValueError('No se encontraron las columnas Codigo y Nombre en el Excel.')
                 rows=[]
@@ -125,7 +159,7 @@ class Store:
                     for header,cell in zip(headers,cells):
                         if header is None:continue
                         value=cell.value
-                        if heading(header) in {'code','codigo','codigo zeta','rut','ruc'}:
+                        if heading(header) in {'code','codigo','codigo zeta','cod','codigo articulo','codigo concepto','codigo proveedor','rut','ruc'}:
                             if isinstance(value,(int,float)) and not isinstance(value,bool) and float(value).is_integer():
                                 value=str(int(value))
                                 mask=cell.number_format or ''
@@ -143,13 +177,15 @@ class Store:
             raise ValueError('Tipo de catálogo inválido.')
         if not isinstance(rows, list) or not rows:
             raise ValueError('El catálogo está vacío.')
+        if kind is None and any(not row.get('kind') for row in rows):
+            kind=detect_catalog_kind(filename,headers or list(rows[0]),labels)
         seen = set()
         for row in rows:
             if kind:
                 import unicodedata
                 def normalized(value):
                     return ''.join(c for c in unicodedata.normalize('NFD',str(value or '').strip().casefold()) if not unicodedata.combining(c))
-                aliases={'codigo':'code','codigo zeta':'code','nombre':'name','descripcion':'name','razon social':'name','ruc':'rut','sinonimos':'synonyms'}
+                aliases={'codigo':'code','codigo zeta':'code','cod':'code','codigo articulo':'code','codigo concepto':'code','codigo proveedor':'code','nombre':'name','descripcion':'name','razon social':'name','denominacion':'name','articulo':'name','concepto':'name','ruc':'rut','sinonimos':'synonyms'}
                 row_keys={normalized(k):v for k,v in row.items()}
                 row.clear()
                 row.update({aliases.get(k,k):v for k,v in row_keys.items()})
@@ -157,8 +193,8 @@ class Store:
                 row['kind']=kind
                 if 'iva' in row and 'vat' not in row:
                     rate=normalized(row.pop('iva')).replace('%','').strip()
-                    rates={'exento':'1','0':'1','10':'2','22':'3'}
-                    if rate not in rates:raise ValueError('La columna IVA debe indicar Exento, 0, 10 o 22. Usá vat para indicadores 1, 2 o 3.')
+                    rates={'exento':'1','0':'1','10':'2','22':'3','iva en suspenso':'12','en suspenso':'12','suspenso':'12'}
+                    if rate not in rates:raise ValueError('La columna IVA admite Exento, 0, 10, 22 o IVA en suspenso.')
                     row['vat']=rates[rate]
             if row.get('kind') not in allowed or not str(row.get('code', '')).strip() or not row.get('name'):
                 raise ValueError('Cada fila requiere kind, code y name. Ver formato en Ayuda.')
@@ -168,11 +204,11 @@ class Store:
             if 'vat' in row:
                 vat=row['vat']
                 if isinstance(vat,list):
-                    if any(str(value) not in {'1','2','3'} for value in vat):raise ValueError('IVA de catálogo inválido.')
+                    if any(str(value) not in {'1','2','3','12'} for value in vat):raise ValueError('IVA de catálogo inválido.')
                     row['vat']=[str(value) for value in vat]
                 elif vat is not None:
                     values=str(vat).split('|')
-                    if any(value not in {'1','2','3'} for value in values if value):raise ValueError('IVA de catálogo inválido.')
+                    if any(value not in {'1','2','3','12'} for value in values if value):raise ValueError('IVA de catálogo inválido.')
                     row['vat']='|'.join(value for value in values if value)
             synonyms=row.get('synonyms') or []
             if isinstance(synonyms,str):
@@ -230,11 +266,14 @@ class Store:
                     previous = json.loads(existing['source'])
                     if previous['sha256CFE'] != source['sha256CFE']:
                         raise ValueError('XML diferente con la misma identidad fiscal: ' + source['clave'])
-                    extra_totals={k:source['totales'][k] for k in ('suspenso','pagar')
+                    extra_totals={k:source['totales'][k] for k in ('suspenso','impuestoPercibido','pagar')
                                   if k in source['totales'] and k not in previous['totales']}
-                    if 'dirRecep' not in previous or extra_totals:
+                    if ('dirRecep' not in previous or extra_totals or previous.get('ajustesGlobales')!=source['ajustesGlobales']
+                            or previous.get('referencias')!=source['referencias']):
                         previous.setdefault('dirRecep',source['dirRecep'])
                         previous['totales'].update(extra_totals)
+                        previous['ajustesGlobales']=source['ajustesGlobales']
+                        previous['referencias']=source['referencias']
                         db.execute('UPDATE invoices SET source=? WHERE company=? AND key=?',
                                    (json.dumps(previous), company, source['clave']))
                 else:
@@ -272,11 +311,17 @@ class Store:
                 raise ValueError('Comprobante inexistente.')
             if db.execute("SELECT 1 FROM jobs WHERE company=? AND status IN ('queued','running','cancelling')", (company,)).fetchone():
                 raise ValueError('Esperá a que termine el trabajo antes de cambiar decisiones.')
-            allowed = {'mode', 'supplier', 'center', 'payment', 'lines', 'skip', 'reviewed', 'destinationKind', 'skipSupplier', 'groupByVat'}
+            allowed = {'mode', 'supplier', 'center', 'payment', 'lines', 'skip', 'reviewed', 'destinationKind', 'skipSupplier', 'groupByVat', 'roundingDestination'}
             if set(patch) - allowed:
                 raise ValueError('Campo de decisión desconocido.')
             if 'groupByVat' in patch and type(patch['groupByVat']) is not bool:
                 raise ValueError('Opción de agrupar por IVA inválida.')
+            if 'roundingDestination' in patch:
+                target=patch['roundingDestination']
+                if target is not None and (not isinstance(target,dict) or not any(
+                        c['kind'] in {'article','concept'} and c['kind']==target.get('kind') and c['code']==target.get('code')
+                        for c in self.catalog())):
+                    raise ValueError('Elegí el destino del redondeo desde el catálogo.')
             decision = json.loads(row['decision'])
             source=json.loads(row['source'])
             if 'skipSupplier' in patch:
@@ -289,7 +334,13 @@ class Store:
                 patch.pop('skipSupplier')
             if 'destinationKind' in patch:
                 if patch['destinationKind'] not in {'article','concept'}:raise ValueError('Tipo de destino invalido.')
-                decision['lines']={k:v for k,v in decision.get('lines',{}).items() if v.get('ignore') or v.get('kind')==patch['destinationKind']}
+                compatible={}
+                for index,choice in decision.get('lines',{}).items():
+                    if choice.get('ignore') or choice.get('kind')==patch['destinationKind']:
+                        compatible[index]=choice
+                    elif choice.get('ignore') is False:
+                        compatible[index]={'ignore':False}
+                decision['lines']=compatible
             manual_choices=dict(patch.get('lines',{})) if learn_lines else {}
             if learn_lines:
                 choices=dict(manual_choices)
@@ -339,7 +390,9 @@ class Store:
                     if set(choice) == {'ignore'}:
                         previous = dict(lines.get(index, {}))
                         previous.pop('ignore',None)
-                        choice = dict(previous,ignore=True) if choice['ignore'] else previous
+                        choice = dict(previous,ignore=choice['ignore'])
+                    elif lines.get(index,{}).get('ignore') is False:
+                        choice=dict(choice,ignore=False)
                     if choice:lines[index]=choice
                     else:lines.pop(index,None)
                 patch = dict(patch, lines=lines)
@@ -444,6 +497,7 @@ class Store:
             attempt_records=list(db.execute('SELECT a.key,a.data,a.created FROM attempts a JOIN jobs j ON j.id=a.job WHERE j.company=? ORDER BY a.id',(company,)))
             results={r['key']:dict(json.loads(r['data']),checked_at=r['created']) for r in attempt_records}
             positive_results={r['key']:dict(json.loads(r['data']),checked_at=r['created']) for r in attempt_records if json.loads(r['data']).get('estado') in {'CONFIRMADO','RESULTADOS_EN_ZETA_NO_CARGAR'}}
+            supplier_blocks={r['key']:json.loads(r['data']) for r in attempt_records if json.loads(r['data']).get('estado')=='BLOQUEADO_CONFIRMACION_PROVEEDOR'}
         batch = settings.get('batch', {})
         keys = set(batch.get('keys', []))
         learned_centers=settings.get('supplier_centers:'+company,{})
@@ -502,15 +556,30 @@ class Store:
             if mode_pending:reasons.append('Corrobora la modalidad de la factura contado: contado o credito.')
             manual_ignored={index for index,raw in enumerate(source['lineas'])
                             if decision.get('lines',{}).get(str(index),{}).get('ignore') and can_ignore_line(raw)}
-            non_monetary=set(non_monetary_line_indices(source))
-            excluded=manual_ignored | non_monetary
+            included_zeros={index for index in zero_line_indices(source)
+                            if decision.get('lines',{}).get(str(index),{}).get('ignore') is False}
+            auto_ignored=set(zero_line_indices(source))-included_zeros-manual_ignored
+            non_monetary=set(non_monetary_line_indices(source))-included_zeros
+            excluded=manual_ignored | auto_ignored | non_monetary
+            tolerance=Decimal(settings['company'].get('tolerance','1'))
+            auto_rounding_indices=set(rounding_line_indices(source,tolerance))-manual_ignored
+            has_negative=any(Decimal(raw['monto'])<0 for index,raw in enumerate(source['lineas'])
+                             if index not in excluded and index not in auto_rounding_indices)
+            has_perceived=any(raw['indicadorIVA']=='11' for index,raw in enumerate(source['lineas']) if index not in excluded)
+            grouped=decision.get('groupByVat',has_negative or has_perceived) is True
+            supported={'1','2','3','6','7'}
+            if grouped:supported.update({'11','12'})
             special_indicators={raw['indicadorIVA'] for index,raw in enumerate(source['lineas'])
-                                if index not in excluded and raw['indicadorIVA'] not in {'1','2','3','6','7'}}
-            auto_rounding_indices=set(rounding_line_indices(source,Decimal(settings['company'].get('tolerance','1'))))-manual_ignored
+                                if index not in excluded and raw['indicadorIVA'] not in supported}
+            rounding_adjustment=payable_rounding(source,auto_rounding_indices,tolerance) if grouped else None
             for index, raw in enumerate(source['lineas']):
                 if index in manual_ignored:
                     proposals.append({'index':index,'options':[],'rule':None,
                                       'reason':'Línea ignorada por tu elección. Se conserva en el XML.','confidence':1})
+                    continue
+                if index in auto_ignored:
+                    proposals.append({'index':index,'options':[],'rule':None,
+                                      'reason':'Importe cero: ignorada por defecto. Podés volver a incluirla.','confidence':1})
                     continue
                 if index in auto_rounding_indices:
                     proposals.append({'index':index,'options':[],'rule':None,
@@ -520,12 +589,7 @@ class Store:
                 if index in non_monetary:
                     proposals.append({'index':index,'options':[],'rule':None,'reason':'Entrega gratuita sin importe: queda registrada en el XML y no requiere artículo.','confidence':1})
                     continue
-                if Decimal(raw['monto'])==0:
-                    reasons.append('Marcá Ignorar línea en el renglón '+str(index+1)+' de importe cero.')
-                    proposals.append({'index':index,'options':[],'rule':None,
-                                      'reason':'Importe cero. Podés ignorar la línea.','confidence':0})
-                    continue
-                if raw['indicadorIVA'] not in {'1','2','3','6','7'}:
+                if raw['indicadorIVA'] not in supported:
                     proposals.append({'index':index,'options':[],'rule':None,'reason':'Indicador fiscal especial: no es una tasa de IVA.','confidence':0})
                     continue
                 choice = decision.get('lines', {}).get(str(index))
@@ -550,13 +614,27 @@ class Store:
                     continue
                 target = next((c for c in catalog if chosen and c['kind'] == chosen.get('kind') and c['code'] == chosen.get('code')), None)
                 if not target:
-                    reasons.append('Elegí el destino de la línea ' + str(index + 1))
+                    vat=raw['indicadorIVA']
+                    reason=('Elegí el destino para '+VAT_LABELS[vat]+'.' if grouped and vat in {'1','2','3','11','12'}
+                            else 'Elegí el destino de la línea '+str(index+1))
+                    if reason not in reasons:reasons.append(reason)
                     continue
                 allowed_vat=target.get('vat', [])
                 if isinstance(allowed_vat,str):allowed_vat=allowed_vat.split('|') if allowed_vat else []
-                if raw['indicadorIVA'] not in allowed_vat:
-                    reasons.append('Verificá IVA del destino en la línea ' + str(index + 1))
-                lines.append(dict(raw, origenes=[index], codigoZeta=target['code'], descripcionZeta=target['name'], tipoDestino=target['kind']))
+                line=dict(raw, origenes=[index], codigoZeta=target['code'], descripcionZeta=target['name'], tipoDestino=target['kind'])
+                vat=raw['indicadorIVA']
+                reason=None
+                if 'ivaZeta' in chosen:
+                    line['ivaZeta']=chosen['ivaZeta']
+                    try:validate_zeta_vat_choice(vat,line['ivaZeta'])
+                    except ValueError as error:reason=str(error)
+                elif grouped and vat in {'1','2','3','11','12'}:
+                    line['ivaZeta']='1' if vat in {'11','12'} else vat
+                elif vat not in allowed_vat:
+                    reason=('Elegí el IVA en Zeta para el grupo '+VAT_LABELS.get(vat,vat)+'.' if grouped
+                            else 'Elegí el IVA en Zeta para la línea '+str(index+1)+'.')
+                if reason and reason not in reasons:reasons.append(reason)
+                lines.append(line)
             kinds = {l['tipoDestino'] for l in lines}
             is_credit_note = source['tipo'] == '112'
             if is_credit_note:
@@ -571,14 +649,19 @@ class Store:
                 reasons.append('Elegí una forma de pago real.')
             if center and not any(c['kind'] == 'center' and c['code'] == center for c in catalog):
                 reasons.append('El centro elegido no está en el catálogo.')
-            payload = {'clave': source['clave'], 'cfe': dict(source['totales'], **{k: source[k] for k in ('tipo','serie','numero','fecha','moneda')}), 'referencias': source.get('referencias', []), 'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra', 'proveedor': {'rut': source['rut'], 'nombre': source['nombre'], 'codigoZeta': provider['code'] if provider else ''}, 'lineas': lines, 'lineasIgnoradas': [int(i) for i, c in decision.get('lines', {}).items() if c.get('ignore')], 'zeta': {'comprobante': form, 'centroCosto': center, 'formaPago':payment['code'] if mode=='cash' and payment else '', 'formaPagoNombre':payment['name'] if mode=='cash' and payment else ''}, 'completo': True, 'estado': 'reviewed' if decision.get('reviewed') else 'auto'}
+            payload = {'clave': source['clave'], 'cfe': dict(source['totales'], **{k: source[k] for k in ('tipo','serie','numero','fecha','moneda')}), 'referencias': source.get('referencias', []), 'tipoOperacion':'nota_credito_compra' if is_credit_note else 'compra', 'proveedor': {'rut': source['rut'], 'nombre': source['nombre'], 'codigoZeta': provider['code'] if provider else ''}, 'lineas': lines, 'lineasIgnoradas': sorted(manual_ignored | auto_ignored), 'zeta': {'comprobante': form, 'centroCosto': center, 'formaPago':payment['code'] if mode=='cash' and payment else '', 'formaPagoNombre':payment['name'] if mode=='cash' and payment else ''}, 'completo': True, 'estado': 'reviewed' if decision.get('reviewed') else 'auto'}
             if generic_override:payload['proveedor']['generico']=True
             if manual_supplier:payload['proveedor']['seleccionManual']=True
-            if decision.get('groupByVat') is True:payload['agruparPorIVA']=True
+            if grouped:payload['agruparPorIVA']=True
+            if rounding_adjustment and decision.get('roundingDestination'):
+                choice=decision['roundingDestination']
+                target=next((c for c in catalog if c['kind']==choice['kind'] and c['code']==choice['code']),None)
+                if target:
+                    payload['destinoRedondeo']={'codigoZeta':target['code'],'descripcionZeta':target['name'],'tipoDestino':target['kind']}
             plan = None
             if not reasons:
                 try:
-                    plan = preview_net_lines(source, payload, company, Decimal(settings['company'].get('tolerance', '1')))
+                    plan = preview_net_lines(source, payload, company, tolerance)
                 except ValueError as error:
                     reasons.append(str(error))
             state = 'needs_review' if reasons else 'ready'
@@ -587,7 +670,7 @@ class Store:
                          or (batch.get('fresh_review') and last['checked_at']<batch.get('date',''))):
                 last=None
             positive=positive_results.get(record['key'])
-            if positive and positive.get('source_hash')==source['sha256CFE'] and (not batch.get('fresh_review') or positive.get('checked_at','')>=batch.get('date','')):last=positive
+            if positive and positive.get('source_hash')==source['sha256CFE']:last=positive
             checked=bool(last and last.get('source_hash')==source['sha256CFE'] and (last.get('estado') in {'CONFIRMADO','RESULTADOS_EN_ZETA_NO_CARGAR'} or last.get('supplier_code')==payload['proveedor']['codigoZeta']))
             duplicate_state='unchecked'
             if checked:
@@ -596,10 +679,26 @@ class Store:
                 elif status=='RESULTADOS_EN_ZETA_NO_CARGAR':state,duplicate_state='existing','existing'
                 elif status in {'AUSENTE_VERIFICADO','APTO_PENDIENTE_GUARDADO'}:duplicate_state='absent'
                 else:duplicate_state='uncertain'
+            supplier_proof=supplier_blocks.get(record['key']) or {}
+            actual=supplier_proof.get('proveedor_zeta',{})
+            supplier_confirmation_required=(state not in {'loaded','existing'}
+                and supplier_proof.get('source_hash')==source['sha256CFE']
+                and supplier_proof.get('supplier_code')==payload['proveedor']['codigoZeta']
+                and actual.get('codigoZeta')==payload['proveedor']['codigoZeta']
+                and str(actual.get('rut','')).strip()=='' and not manual_supplier
+                and settings.get('approvals',{}).get(payload['proveedor']['codigoZeta'])!=source['rut'])
+            if supplier_confirmation_required:
+                state='needs_review'
+                reasons.append('Confirmá la relación del proveedor '+actual.get('nombre',source['nombre'])+
+                               ' ('+actual['codigoZeta']+'), que tiene el RUT vacío en Zeta.')
             if special_indicators and state not in {'existing','loaded'}:
-                state='manual'
-                reasons=['El XML contiene '+', '.join(VAT_LABELS.get(code,'indicador fiscal '+code) for code in sorted(special_indicators))+
-                         '. Usá el resumen por IVA para completar el comprobante en Zeta.']
+                if special_indicators<={'11','12'}:
+                    state='needs_review'
+                    reasons=['Agrupá por IVA para elegir el destino de '+', '.join(VAT_LABELS[code] for code in sorted(special_indicators))+'.']
+                else:
+                    state='manual'
+                    reasons=['El XML contiene '+', '.join(VAT_LABELS.get(code,'indicador fiscal '+code) for code in sorted(special_indicators))+
+                             '. Cerecito todavía no tiene un cálculo de carga para este tratamiento. La agrupación muestra su desglose para completarlo en Zeta.']
             elif not lines and state not in {'existing','loaded'} and all(raw['indicadorIVA']=='5' and Decimal(str(raw['monto']))==0 for raw in source['lineas']):
                 state='manual'
                 reasons=['Comprobante compuesto solo por entregas gratuitas de importe cero. Revisar en Zeta sin inventar una compra con importe.']
@@ -620,9 +719,14 @@ class Store:
             elif is_credit_note and mode == 'cash' and state not in {'existing','loaded','manual'}:
                 state='needs_review'
                 reasons.append('Devolución contado: falta validar cómo Zeta registra el reintegro a caja; no se guarda automáticamente.')
-            if decision.get('skip') or source['rut'] in settings.get('excluded_suppliers:'+company,{}):
+            auto_collection=is_zero_collection(source) and state not in {'existing','loaded'}
+            if auto_collection:
+                state, reasons = 'skipped', ['Cobranza sin importe fiscal: salteada automáticamente.']
+            if state not in {'existing','loaded'} and (decision.get('skip') or source['rut'] in settings.get('excluded_suppliers:'+company,{})):
                 state, reasons = 'skipped', []
-            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'reasons': reasons, 'finesa':is_finesa, 'suggested_center':center if 'center' not in decision else '', 'auto_rounding_lines':sorted(auto_rounding_indices), 'non_monetary_lines':sorted(non_monetary), 'tax_groups':tax_breakdown(source,excluded),'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
+            can_precheck=state not in {'skipped','non_invoice','loaded'} and (
+                state!='manual' or (source['tipo'] in {'111','112'} and provider is not None))
+            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'can_precheck':can_precheck, 'reasons': reasons, 'supplier_confirmation_required':supplier_confirmation_required, 'supplier_confirmation_proof':supplier_proof if supplier_confirmation_required else None, 'finesa':is_finesa, 'suggested_center':center if 'center' not in decision else '', 'auto_ignored_lines':sorted(auto_ignored), 'auto_collection':auto_collection, 'auto_rounding_lines':sorted(auto_rounding_indices),'rounding_adjustment':rounding_adjustment, 'non_monetary_lines':sorted(non_monetary), 'tax_groups':tax_breakdown(source,excluded),'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
             with self.connect() as db:
                 for proposal in proposals:
                     db.execute('INSERT OR REPLACE INTO proposals VALUES(?,?,?,?)',(company,record['key'],proposal['index'],json.dumps(dict(proposal,generated=now()))))
@@ -632,9 +736,13 @@ class Store:
         self.assert_idle()
         invoice = next(i for i in self.invoices() if i['key'] == key)
         supplier = next(c for c in self.catalog() if c['kind'] == 'supplier' and c['code'] == code)
-        actual = (invoice.get('last_result') or {}).get('proveedor_zeta', {})
-        if actual.get('codigoZeta')==code and not actual.get('rut'):
-            supplier=dict(supplier,name=actual['nombre'])
+        last=invoice.get('supplier_confirmation_proof') or invoice.get('last_result') or {}
+        actual=last.get('proveedor_zeta',{})
+        if (last.get('estado')=='BLOQUEADO_CONFIRMACION_PROVEEDOR'
+                and last.get('source_hash')==invoice['source']['sha256CFE']
+                and last.get('supplier_code')==code and actual.get('codigoZeta')==code
+                and str(actual.get('rut','')).strip()==''):
+            supplier=dict(supplier,rut='',name=actual['nombre'])
         if supplier.get('rut'):
             raise ValueError('Solo se confirma un proveedor con RUT vacío.')
         settings = self.settings()

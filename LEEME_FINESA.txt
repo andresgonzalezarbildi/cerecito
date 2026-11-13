@@ -30,12 +30,37 @@ En Revisión, usá Ignorar línea para omitir un renglón de importe cero.
 Podés volver a incluirlo desde el mismo renglón. El XML conserva su detalle.
 En Agrupar por IVA elegís un destino por tasa para la carga automática
 de comprobantes con IVA estándar. Cerecito comprueba las bases y totales.
-Para IVA en suspenso y otros indicadores especiales, abrí Resumen, luego
-Carga manual en Zeta y Ver detalle y agrupar. Agrupar por IVA y Copiar resumen
-preparan el desglose para completar en Zeta con los tratamientos separados.
 
 Volver a revisar lote
 Usá el botón junto a Revisar pendientes. Reinicia las decisiones y las
 confirmaciones del lote abierto, vuelve a buscar los comprobantes en Zeta
 y aplica las correlaciones aprendidas al preparar la revisión. Se conservan
 los XML, el historial de cargas y las correlaciones guardadas.
+
+Comprobantes de carga manual en Revisión
+Revisión incluye los comprobantes de carga manual del lote. El selector
+Ir a comprobante permite abrirlos por proveedor, serie y número. Podés
+agruparlos por IVA y marcar su revisión para seguir con el siguiente.
+La búsqueda de duplicados incluye facturas y notas de crédito de carga
+manual con proveedor identificado.
+
+Cargar los grupos por IVA en Zeta
+En Revisión activá Agrupar por IVA y elegí un destino por grupo. Cerecito
+carga cada grupo con cantidad 1 y la descripción del destino más su IVA.
+Para un grupo con IVA en suspenso, podés elegir un destino de tu catálogo
+y seleccionar Sin IVA (0%) para Zeta. El grupo conserva el indicador del XML.
+La carga agrupada verifica al centésimo las bases, el IVA y el total fiscal.
+Si el XML explica la diferencia con un redondeo no facturable, elegí el
+destino de redondeos para cargar un renglón separado sin IVA.
+
+Elegir destino e IVA por separado
+Podés elegir el concepto o artículo y seleccionar Según XML, Sin IVA (0%),
+10% o 22% en IVA en Zeta, por renglón o por grupo. La tasa elegida se guarda
+para el comprobante. Cerecito valida que el importe del IVA cuadre con el XML.
+
+Redondeos en la carga agrupada
+Cuando el redondeo del XML coincide con la diferencia entre el total fiscal
+y el importe a pagar, Agrupar por IVA muestra Destino del redondeo en Zeta.
+Elegí el artículo o concepto que usás para redondeos. La aplicación carga el
+ajuste aparte, con signo, cantidad 1 y Sin IVA. El XML conserva su desglose y
+Cerecito verifica el importe a pagar al centésimo.

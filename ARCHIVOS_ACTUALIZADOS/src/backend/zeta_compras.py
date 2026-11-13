@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright
 from conciliar import BASE, one_file, read_excel, already_registered
 from chrome_connection import connect_chrome, choose_page
-from xml_source import read_zip, preview_net_lines
+from xml_source import read_zip, preview_net_lines, VAT_RATES
 from zeta_bot import exclusive_lock, save_state, stamp, append_ledger, unresolved_attempts
 from zeta_ui_runtime import wait_value, wait_path, click_readonly, select_article, open_prompt, prompt_frame,select_prompt_result
 from search_scope import invoice_search_period
@@ -34,9 +34,9 @@ def money(text):
 
 
 def tax_rate(line):
-    rates={'1':Decimal('0'),'2':Decimal('.10'),'3':Decimal('.22')}
-    if str(line.get('indicadorIVA','')) not in rates:raise RuntimeError('Indicador IVA sin tasa soportada.')
-    return rates[str(line['indicadorIVA'])]
+    indicator=str(line.get('indicadorIVA',''))
+    if indicator not in VAT_RATES:raise RuntimeError('Indicador IVA sin tasa soportada.')
+    return VAT_RATES[indicator]
 
 
 def unit_price(line):

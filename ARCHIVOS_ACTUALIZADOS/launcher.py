@@ -41,8 +41,9 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 store,jobs=services()
                 settings=store.settings()
-                invoices=store.invoices() if settings.get('company') else []
+                # Leer los trabajos primero asegura que un estado final incluya sus resultados.
                 history=jobs.list() if settings.get('company') else []
+                invoices=store.invoices() if settings.get('company') else []
                 self.reply({'token':SESSION_TOKEN,'settings':settings,'invoices':invoices,'catalog':store.catalog() if settings.get('company') else [],'jobs':history,'data_dir':str(DATA_DIR),'sectors':store.sectors() if settings.get('company') else []})
             except Exception as error:self.reply({'error':str(error)},400)
             return
@@ -79,7 +80,7 @@ class Handler(SimpleHTTPRequestHandler):
             elif path=='/api/configure':store.configure(data)
             elif path=='/api/import':
                 result=store.import_documents(data['filename'],base64.b64decode(data['content'],validate=True))
-                if any(i['state'] not in {'skipped','non_invoice','loaded','manual'} for i in store.invoices()):
+                if any(i['can_precheck'] for i in store.invoices()):
                     result['job']=jobs.start(secrets.token_urlsafe(20),precheck=True)
             elif path=='/api/catalog/preview':result={'rows':store.preview_catalog(data['filename'],base64.b64decode(data['content'],validate=True),data.get('kind'))}
             elif path=='/api/catalog/import':result={'count':store.import_catalog(data['rows'])}
@@ -95,7 +96,9 @@ class Handler(SimpleHTTPRequestHandler):
                     result['job']=jobs.start(secrets.token_urlsafe(20),precheck=True,invoice_keys=[data['key']])
             elif path=='/api/sector':store.apply_sector(data['key'],data['center'],data['mapping'])
             elif path=='/api/rule':store.rule(data['key'],int(data['index']))
-            elif path=='/api/supplier/confirm':store.approve_supplier(data['key'],data['code'])
+            elif path=='/api/supplier/confirm':
+                store.approve_supplier(data['key'],data['code'])
+                result={'job':jobs.start(secrets.token_urlsafe(20),precheck=True,invoice_keys=[data['key']])}
             elif path=='/api/review/reset':
                 revision=data.get('revision')
                 if not isinstance(revision,str) or not revision:raise ValueError('Falta identificar el lote actual.')

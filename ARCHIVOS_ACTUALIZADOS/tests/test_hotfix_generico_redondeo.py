@@ -119,6 +119,6 @@ class HotfixTests(unittest.TestCase):
         self.store.import_documents('special.xml',xml(616,'100.01',extra=extra))
         i=self.chosen()
         self.assertEqual(i['auto_rounding_lines'],[])
-        self.assertEqual(i['state'],'manual')
+        self.assertEqual(i['state'],'needs_review')
 
 if __name__=='__main__':unittest.main()

@@ -1,0 +1,102 @@
+﻿CERECITO | ACTUALIZACION DEL 13/11/2026
+
+Instalación
+1. Cerrá Cerecito.
+2. Extraé este ZIP en su carpeta principal, donde está ABRIR_CERECITO.bat.
+3. Ejecutá ACTUALIZAR_CERECITO.bat.
+4. Abrí Cerecito otra vez. Si la vista anterior sigue abierta, presioná Ctrl+F5.
+
+El instalador crea un respaldo de los archivos que actualiza.
+
+Distribución de pantalla
+Destinos por IVA comienza cerrado al abrir cada comprobante.
+Podés desplegarlo pulsando su título.
+El título de la pantalla aparece en la barra superior. Configuración está
+en el menú lateral. La factura aprovecha el espacio que antes ocupaban
+el título duplicado y los contadores superiores.
+Opciones del lote abre un panel flotante que mantiene el tamaño del menú.
+La vista se adapta también a ventanas de menor altura y pantallas angostas.
+
+Revisión y navegación
+Anterior permite volver a los comprobantes que acabás de confirmar durante
+la revisión. Revisar pendientes muestra los que necesitan una decisión.
+Listos para cargar permite consultar los que ya tienen todo elegido.
+Los comprobantes confirmados con el mismo XML permanecen apartados al
+reimportar el ZIP o volver a revisar el lote.
+
+La factura mantiene el encabezado y las acciones a la vista. El detalle
+se desplaza dentro de su panel. El historial muestra cada trabajo cerrado
+por defecto. Podés desplegarlo para ver sus comprobantes y resultados.
+Los ajustes de tolerancia se verifican sin mostrar datos técnicos en la factura.
+
+Cobranzas y líneas en cero
+Los comprobantes con total fiscal cero y movimientos exclusivamente no
+facturables se saltean automáticamente, aunque tengan un importe a pagar.
+Las líneas de importe cero vienen ignoradas y tienen Volver a incluir.
+La decisión se aplica también a los comprobantes del lote ya importado.
+
+Agrupación por IVA y descuentos
+El IVA inicial del grupo se toma del XML, independientemente del artículo
+o concepto elegido. El selector sigue disponible para editarlo. Cerecito
+comprueba que los importes fiscales cuadren con el XML.
+Las facturas con líneas negativas se proponen agrupadas por IVA. Los importes
+negativos restan del grupo correspondiente, conservando su base e impuesto.
+Podés quitar la agrupación. La carga con descuentos requiere agrupar por IVA.
+
+Impuesto percibido y carga manual
+Los grupos de impuesto percibido (indicador 11 del XML) permiten elegir
+artículo o concepto. Se propone Sin IVA (0%) como IVA adicional en Zeta.
+El cálculo conserva el grupo original y lo comprueba contra MntImpuestoPerc.
+El comprobante queda listo para cargar cuando coinciden bases, impuestos,
+total fiscal e importe a pagar y se completaron los destinos.
+IVA en suspenso también ofrece Agrupar por IVA para elegir sus destinos.
+Una etiqueta vacía de descuentos globales ya no activa la carga manual.
+Para un lote importado antes de esta actualización, volvé a importar el mismo
+ZIP para leer MntImpuestoPerc y actualizar la detección de descuentos.
+Los tratamientos que todavía requieren carga manual muestran su motivo.
+Dejar para carga manual y seguir guarda la revisión de ese comprobante.
+
+Catálogos, notas de crédito e informe de revisión
+En el menú lateral, abrí Catálogos y usá Cargar catálogos de Zeta.
+Ese botón reconoce proveedores, artículos y conceptos por el nombre del
+archivo, las columnas y los encabezados. Si el archivo es ambiguo, permite
+indicar su tipo antes de mostrar la vista previa.
+
+La lectura de notas de crédito reconoce NroCFERef y NroDocRef. Los contenedores
+vacíos de referencias ya no generan referencias incompletas. Volvé a importar
+el mismo ZIP para actualizar los datos fiscales que ya estaban guardados.
+Una nota que realmente carezca de referencia mantiene su revisión manual.
+
+Copiar informe, en la revisión de una factura, copia los motivos, datos del XML,
+decisiones contables, plan de importes y último resultado en un informe JSON.
+
+El historial tiene filtros Pendientes, Cargadas, No cargadas, Revisar en Zeta
+y Todas. Pendientes aparta resultados anteriores que ya se resolvieron.
+Los motivos de bloqueo se muestran junto al comprobante. Revisar comprobante
+permite volver a sus elecciones.
+La lectura del estado final y la navegación actualizan el resumen y Listos
+para cargar después de cada operación.
+
+Proveedor con RUT vacío en Zeta
+Si la consulta real detectó el RUT vacío, el comprobante vuelve a Pendientes
+aunque el catálogo local tuviera un RUT guardado.
+Abrí una factura del proveedor y usá Confirmar relación. La confirmación
+queda guardada para las otras facturas de ese mismo proveedor y código.
+La interfaz inicia una nueva búsqueda de duplicados al confirmar la relación.
+Una búsqueda de duplicados posterior conserva el aviso de confirmación
+hasta que se resuelva la relación del proveedor.
+
+Descargas normales de Chrome
+La conexión del bot respeta el manejo nativo de descargas y restaura el
+comportamiento predeterminado si una conexión anterior lo había sustituido.
+Los archivos conservan el nombre y la extensión propuestos por la descarga.
+La carpeta se elige desde Configuración de Chrome, Descargas, Ubicación.
+Para usar la carpeta Descargas de Windows, seleccionala desde Cambiar.
+Después de instalar, cerrá la ventana de Chrome que abrió Cerecito y abrila
+de nuevo desde Abrir conexión con Zeta.
+
+Verificación
+Incluye las correcciones anteriores de Finesa, correlaciones, intentos
+interrumpidos, notas de crédito y redondeo separado.
+Se comprobaron los cálculos y la navegación con pruebas automáticas.
+La comprobación visual completa en navegador quedó pendiente en este entorno.

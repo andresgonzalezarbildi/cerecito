@@ -15,9 +15,9 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 from conciliar import BASE,one_file,already_registered,invoice_issues,read_excel,match_zeta
 from revisar_lote import source_index
-from xml_source import preview_net_lines,ignored_line_indices,non_monetary_line_indices,rounding_line_indices
+from xml_source import preview_net_lines,ignored_line_indices,non_monetary_line_indices,rounding_line_indices,validate_zeta_vat_choice
 from chrome_connection import connect_chrome,choose_page
-from zeta_compras import LIST,refresh_list,prepare_header,select_supplier_exact,set_control,localized,money,unit_price,input_price,adapt_zeta_rounding,read_totals,confirm_once,SupplierApprovalRequired,validate_supplier_catalog,finish_cash_payment
+from zeta_compras import LIST,refresh_list,prepare_header,select_supplier_exact,set_control,localized,money,unit_price,input_price,tax_rate,adapt_zeta_rounding,read_totals,confirm_once,SupplierApprovalRequired,validate_supplier_catalog,finish_cash_payment
 from zeta_ui_runtime import wait_path,wait_value,select_article,prompt_frame,open_prompt,click_readonly,select_prompt_result
 from informe_pendientes import write_report
 from search_scope import invoice_search_period
@@ -34,8 +34,12 @@ PROFILES={'Compra Crédito':{'code':'21','destination':'article','editor':'linea
 ROUNDING_TOLERANCE=Decimal('1.00')
 
 
-def rounding_differences(actual,expected,*,rounding_model=None):
+def rounding_differences(actual,expected,*,rounding_model=None,exact=False):
     differences={key:Decimal(str(actual[key]))-Decimal(str(value)) for key,value in expected.items()}
+    if exact:
+        if any(differences.values()):
+            raise ValueError('Los importes agrupados deben coincidir al centésimo. Zeta: '+str(actual)+'. XML: '+str(expected))
+        return {}
     if rounding_model is not None and all(Decimal(str(actual[k])).is_finite() and abs(Decimal(str(actual[k]))-Decimal(str(rounding_model[k])))<=Decimal('.01') for k in expected):
         return {key:str(value) for key,value in differences.items() if value}
     if any(not value.is_finite() or abs(value)>ROUNDING_TOLERANCE for value in differences.values()):
@@ -45,18 +49,20 @@ def rounding_differences(actual,expected,*,rounding_model=None):
 
 def allow_rounding(plan):
     plan=deepcopy(plan)
+    exact=plan.get('agrupadoPorIVA') is True
+    tolerance=Decimal(0) if exact else ROUNDING_TOLERANCE
     actual={key:Decimal(0) for key in ('neto','iva','total')}
     expected={key:Decimal(0) for key in actual}
     for line in plan['lineas']:
         price=unit_price(line);quantity=Decimal(line['cantidadXML'])
         base=(price*quantity).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
-        rate={'1':Decimal('0'),'2':Decimal('.10'),'3':Decimal('.22')}[line['indicadorIVA']]
+        rate=tax_rate(line)
         tax=(base*rate).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
         for key,value,field in [('neto',base,'baseEsperada'),('iva',tax,'ivaEsperado'),('total',base+tax,'totalEsperado')]:
             actual[key]+=value;expected[key]+=Decimal(line[field])
-        line['toleranciaRedondeo']=str(ROUNDING_TOLERANCE)
-    plan['toleranciaRedondeo']=str(ROUNDING_TOLERANCE)
-    plan['diferenciasRedondeoPrevistas']=rounding_differences(actual,plan.get('totalesXML',expected),rounding_model=actual)
+        line['toleranciaRedondeo']=str(tolerance)
+    plan['toleranciaRedondeo']=str(tolerance)
+    plan['diferenciasRedondeoPrevistas']=rounding_differences(actual,plan.get('totalesZeta',plan.get('totalesXML',expected)),rounding_model=actual,exact=exact)
     return plan
 
 
@@ -198,7 +204,8 @@ def plan_for(invoice,source):
     invoice=deepcopy(invoice)
     invoice.setdefault('zeta',{})['centroCosto']=invoice.get('zeta',{}).get('centroCosto') or ''
     ignored=set(ignored_line_indices(source,invoice))|set(non_monetary_line_indices(source))|set(rounding_line_indices(source,ROUNDING_TOLERANCE))
-    unsupported=[line for index,line in enumerate(source.get('lineas',[])) if index not in ignored and str(line.get('indicadorIVA','')) not in {'1','2','3'}]
+    supported={'1','2','3','11','12'} if invoice.get('agruparPorIVA') is True else {'1','2','3'}
+    unsupported=[line for index,line in enumerate(source.get('lineas',[])) if index not in ignored and str(line.get('indicadorIVA','')) not in supported]
     if unsupported:
         line=unsupported[0]
         raise ValueError('La línea XML «'+line.get('descripcion','')+'» tiene indicador '+str(line.get('indicadorIVA',''))+
@@ -223,7 +230,7 @@ def plan_for(invoice,source):
     if any(l['tipoDestino']!=profile['destination'] for l in invoice['lineas']):
         raise ValueError('Destino contable distinto del formulario específico.')
     plan=preview_net_lines(source,invoice,company_rut(),rounding_tolerance=ROUNDING_TOLERANCE)
-    if profile['destination']=='article':
+    if profile['destination']=='article' and not plan['agrupadoPorIVA']:
         try:exact_plan=adapt_zeta_rounding(plan)
         except RuntimeError:exact_plan=plan
         plan=allow_rounding(exact_plan)
@@ -328,7 +335,11 @@ def resume_empty_header(page,invoice,source,previous,rows,expected_company):
 
 def apply_line_tax(page,line,profile):
     indicator=line['indicadorIVA']
-    if indicator=='1':
+    if 'ivaZeta' in line:
+        apply_manual_tax(page,indicator,line['ivaZeta'],profile)
+    elif indicator=='12':
+        select_suspended_tax(page)
+    elif indicator=='1':
         options=page.locator('#IVAIDLIN option').evaluate_all("options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))")
         if not any(o['value']=='0' and o['text'] in {'-','0 -','0 - Exento','Exento'} for o in options):
             raise ValueError('La opción de IVA sin impuesto cambió en Zeta; no se confirma la línea exenta.')
@@ -344,6 +355,50 @@ def apply_line_tax(page,line,profile):
         if page.locator('#IVAIDLIN').input_value()!=value:raise ValueError('Zeta no conserva el IVA del XML.')
     else:
         validate_article_tax(page,line)
+
+
+def apply_manual_tax(page,indicator,choice,profile):
+    validate_zeta_vat_choice(indicator,choice)
+    if choice=='1':
+        value='0'
+        labels={'-','0 -','0 - Exento','Exento','Sin IVA'}
+    elif profile['destination']=='concept':
+        value,label={'2':('3','3 - IVA 10% Gastos'),'3':('4','4 - IVA 22% Gastos')}[choice]
+        labels={label}
+    else:
+        value,label={'2':('1','1 - IVA 10%'),'3':('2','2 - IVA 22%')}[choice]
+        labels={label}
+    options=page.locator('#IVAIDLIN option').evaluate_all("options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))")
+    matches=[option for option in options if option['value']==value]
+    if len(matches)!=1 or matches[0]['text'] not in labels:
+        raise ValueError('Zeta no muestra la opción de IVA seleccionada para este destino.')
+    control=page.locator('#IVAIDLIN')
+    if control.input_value()!=value:
+        if not control.is_enabled():raise ValueError('Zeta bloqueó el selector de IVA para este destino.')
+        control.select_option(value=value,timeout=5000)
+        control.press('Tab')
+        wait_value(lambda:page.evaluate('gx.isInputEnabled() && !gx.evt.processing && !gx.spa.isNavigating()'),bool,'El IVA sigue validando.')
+    if control.input_value()!=value or control.evaluate('select=>select.selectedOptions[0]?.textContent.trim()')!=matches[0]['text']:
+        raise ValueError('Zeta no conservó la opción de IVA seleccionada.')
+
+
+def select_suspended_tax(page):
+    control=page.locator('#IVAIDLIN')
+    options=page.locator('#IVAIDLIN option').evaluate_all("options=>options.map(o=>({value:o.value,text:o.textContent.trim()}))")
+    matches=[option for option in options if option['value'] and re.search(
+        r'\biva\s+(?:en\s+)?suspenso\b',option['text'],re.I) and not re.search(r'[1-9][0-9.,]*\s*%',option['text'])]
+    if len(matches)!=1 or sum(option['value']==matches[0]['value'] for option in options)!=1:
+        raise ValueError('Zeta debe mostrar una opción inequívoca de IVA en suspenso para el destino seleccionado.')
+    value=matches[0]['value']
+    if control.input_value()!=value:
+        if not control.is_enabled():
+            raise ValueError('El destino elegido debe aplicar IVA en suspenso en la ficha de Zeta.')
+        control.select_option(value=value,timeout=5000)
+        control.press('Tab')
+        wait_value(lambda:page.evaluate('gx.isInputEnabled() && !gx.evt.processing && !gx.spa.isNavigating()'),bool,'El IVA sigue validando.')
+    selected=control.evaluate('select=>select.selectedOptions[0]?.textContent.trim()')
+    if control.input_value()!=value or selected!=matches[0]['text']:
+        raise ValueError('Zeta no conservó el IVA en suspenso.')
 
 
 def validate_article_tax(page,line):
@@ -373,6 +428,7 @@ def validate_article_tax(page,line):
 
 def finish_lines(page,invoice,plan,profile,state,state_path):
     docid=state['docid']
+    exact=plan.get('agrupadoPorIVA') is True
     rounding_model={key:Decimal(0) for key in ('neto','iva','total')}
     for index,line in enumerate(plan['lineas']):
         if index:
@@ -384,25 +440,31 @@ def finish_lines(page,invoice,plan,profile,state,state_path):
                        bool,'Zeta sigue validando el artículo.')
         else:select_expense_concept(page,line)
         mode=page.locator('#PRVIVAINCDOC').input_value() if profile['destination']=='article' else 'N'
-        amount=input_price(line,mode)*Decimal(line['cantidadXML'])
-        rate={'1':Decimal(0),'2':Decimal('.10'),'3':Decimal('.22')}[line['indicadorIVA']]
+        price=input_price(line,mode)
+        amount=price*Decimal(line['cantidadXML'])
+        rate=tax_rate(line)
         base=(amount/(1+rate) if mode=='S' else amount).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
         tax=(base*rate).quantize(Decimal('.01'),rounding=ROUND_HALF_UP)
         total=amount.quantize(Decimal('.01'),rounding=ROUND_HALF_UP) if mode=='S' else base+tax
         for key,value in [('neto',base),('iva',tax),('total',total)]:rounding_model[key]+=value
         for selector,value in [('#LINCONCEPTO',line['descripcionXML'][:50]),('#LINCANTIDAD',localized(line['cantidadXML'])),
-                               ('#LINPRECIO1',localized(input_price(line,mode))),('#LINDTO1','0'),('#LINDTO2','0'),('#LINDTO3','0')]:
+                               ('#LINPRECIO1',localized(price)),('#LINDTO1','0'),('#LINDTO2','0'),('#LINDTO3','0')]:
             if page.locator(selector).count():set_control(page,selector,value)
             elif selector not in {'#LINDTO1','#LINDTO2','#LINDTO3'}:raise ValueError('Campo ausente en el formulario: '+selector)
         apply_line_tax(page,line,profile)
+        if exact:
+            if page.locator('#LINCONCEPTO').input_value()!=line['descripcionXML'][:50]:
+                set_control(page,'#LINCONCEPTO',line['descripcionXML'][:50])
+            if money(page.locator('#LINPRECIO1').input_value())!=price or money(page.locator('#LINCANTIDAD').input_value())!=1:
+                raise ValueError('Zeta cambió el precio o la cantidad del grupo antes de guardar.')
         if profile['destination']=='article' and page.locator('#PRVIVAINCDOC').input_value()!=mode:raise ValueError('La modalidad de importes cambió antes de confirmar.')
         confirm_once(page,state,'linea_'+str(index+1),state_path=state_path)
         wait_path(page,'/z.gestion.comprobantes.facturacompra')
         page.reload(wait_until='load');wait_path(page,'/z.gestion.comprobantes.facturacompra')
         totals=read_totals(page);prefix=plan['lineas'][:index+1]
         expected={key:sum((Decimal(l[field]) for l in prefix),Decimal(0)) for key,field in [('neto','baseEsperada'),('iva','ivaEsperado'),('total','totalEsperado')]}
-        if index==len(plan['lineas'])-1:expected=plan.get('totalesXML',expected)
-        differences=rounding_differences(totals,expected,rounding_model=rounding_model)
+        if index==len(plan['lineas'])-1:expected=plan.get('totalesZeta',plan.get('totalesXML',expected))
+        differences=rounding_differences(totals,expected,rounding_model=rounding_model,exact=exact)
         state['diferencias_redondeo']=differences
         state['lineas_confirmadas'].append({'indice':index,'totales':totals})
         state.update(estado='LINEA_CONFIRMADA',totales=totals);save_operation_state(state_path,state)
@@ -530,6 +592,7 @@ def run(save=False,interactive=False,payload=None,progress=None,cancelled=None,d
                         except ValueError as error:
                             item.update(estado='BLOQUEADO_DATOS_O_FORMULARIO',motivo=str(error));continue
                         item.update(estado='APTO_PENDIENTE_GUARDADO',centroCosto=prepared['zeta']['centroCosto'])
+                        if plan.get('ajusteRedondeo'):item['ajuste_redondeo_xml']=plan['ajusteRedondeo']
                         if not save:continue
                         state_path=BASE/operation_path(key)
                         if state_path.exists() and json.loads(state_path.read_text(encoding='utf-8')).get('estado')!='CONFIRMADO' and json.loads(state_path.read_text(encoding='utf-8')).get('guardado_iniciado'):

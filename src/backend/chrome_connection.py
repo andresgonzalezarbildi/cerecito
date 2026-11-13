@@ -61,6 +61,17 @@ def websocket_endpoint(endpoint):
         raise ChromeError('No responde Chrome. Revisá el puerto en chrome://inspect/#remote-debugging.') from exc
 
 
+def restore_default_downloads(connection):
+    """Restaurar el comportamiento nativo que una conexión anterior pudo sustituir."""
+    connection.send_json({'id':2,'method':'Browser.setDownloadBehavior','params':{'behavior':'default'}})
+    while True:
+        response=connection.receive()
+        if response.get('id')==2:
+            if 'error' in response:
+                raise ChromeError('Chrome no permitió restaurar sus descargas. Cerrá el Chrome de Cerecito y volvé a abrirlo.')
+            return
+
+
 def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False):
     config = config or {}
     endpoint = endpoint or os.environ.get('CERECITO_CHROME_ENDPOINT') or config.get('chrome', {}).get('endpoint') or 'http://127.0.0.1:9222'
@@ -108,9 +119,10 @@ def connect_chrome(playwright, config=None, endpoint=None, *, interactive=False)
         target_file.parent.mkdir(parents=True,exist_ok=True)
         target_file.write_text(json.dumps({'target_id':chosen['targetId']}),encoding='utf-8')
         print('Pestaña seleccionada:', chosen['url'].split('?', 1)[0], flush=True)
+        if managed:restore_default_downloads(upstream)
         bridge = ScopedCDP(endpoint, chosen['targetId'], initial_websocket=upstream)
         endpoint = bridge.url
-        browser = playwright.chromium.connect_over_cdp(endpoint, no_defaults=not managed, timeout=45000)
+        browser = playwright.chromium.connect_over_cdp(endpoint, no_defaults=True, timeout=45000)
     except (PlaywrightError, OSError, ValueError, ChromeError) as exc:
         if bridge:
             bridge.close()
