@@ -90,3 +90,5 @@ main.reviewing{overflow:hidden}main.reviewing #content{flex:1;min-height:0;displ
 
 @media(min-width:761px) and (max-height:560px){.sidebar{padding-top:10px;padding-bottom:10px}.sidebar .toolbar{margin:10px 0;gap:2px}.sidebar .toolbar button{min-height:30px;padding-top:6px;padding-bottom:6px}.sidebar .import-button{padding-top:9px;padding-bottom:9px}.sidebar-tools{padding-top:5px}.batch-options{padding-top:7px;padding-bottom:7px}}
 .history-filters{display:flex;flex-wrap:wrap;gap:7px;margin:0 0 16px}.history-filters button{font-size:12px;padding:8px 12px}.status-pill.needs-attention{background:#fff3dc;color:#8b631f}.result-item .result-reason{font-size:11px;line-height:1.5;color:#66786e;white-space:normal}.result-item>button{font-size:11px;padding:7px 10px;margin:0 0 8px 22px}
+.comparison-frame{display:block;width:100%;height:calc(100dvh - 180px);min-height:560px;border:0;border-radius:14px;background:#fff}
+.comparison-intro p{max-width:850px}

@@ -203,8 +203,10 @@ class WorkflowTests(unittest.TestCase):
         self.store.import_documents('suspenso.xml',xml(349,indicator='12'))
         invoice=self.store.invoices()[0]
         self.assertEqual(invoice['state'],'needs_review')
-        self.assertIn('IVA en suspenso',' '.join(invoice['reasons']))
-        self.assertEqual(invoice['payload']['lineas'],[])
+        self.assertTrue(invoice['payload']['agruparPorIVA'])
+        self.assertEqual(invoice['payload']['lineas'][0]['ivaZeta'],'1')
+        self.store.decide(invoice['key'],{'mode':'credit'})
+        self.assertIn('IVA en suspenso',' '.join(self.store.invoices()[0]['reasons']))
 
     def test_perceived_tax_group_is_loadable_without_adding_vat(self):
         from cargar_lote import plan_for
@@ -433,7 +435,9 @@ class WorkflowTests(unittest.TestCase):
                 self.assertEqual(invoice['plan']['lineasIgnoradas'],[1])
                 self.assertEqual(invoice['source']['lineas'][1]['monto'],'0.00')
                 self.store.decide(key,{'lines':{'1':{'ignore':False}}})
-                self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
+                if indicator=='12':
+                    self.assertEqual(self.store.invoices()[0]['state'],'ready')
+                else:self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
 
     def test_group_plan_preserves_origins_and_totals_by_vat(self):
         from cargar_lote import allow_rounding
@@ -558,6 +562,85 @@ class WorkflowTests(unittest.TestCase):
             self.store.decide(key,{'groupByVat':False,'lines':{str(i):{'kind':'article','code':'A1','ivaZeta':'3'} for i in (0,1)}})
             self.assertIn('Agrupá por IVA',' '.join(self.store.invoices()[0]['reasons']))
 
+    def test_group_inherits_destination_for_unassigned_negative_with_automatic_vat(self):
+        from cargar_lote import allow_rounding
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Descuento sin regla</NomItem><IndFact>3</IndFact><MontoItem>-10</MontoItem><Cantidad>-1</Cantidad></Item>'
+        raw=xml(1600,'109.8',indicator='3',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',
+            b'<MntNetoIVATasaBasica>90</MntNetoIVATasaBasica><MntIVATasaBasica>19.8</MntIVATasaBasica>')
+        for kind,code in [('article','A1'),('concept','G1')]:
+            self.store.import_documents('discount.xml',raw)
+            key=self.store.invoices()[0]['key']
+            self.store.decide(key,{'mode':'credit','destinationKind':kind,'lines':{'0':{'kind':kind,'code':code}}})
+            invoice=Store(self.directory).invoices()[0]
+            self.assertEqual(invoice['state'],'ready',invoice['reasons'])
+            self.assertTrue(invoice['payload']['agruparPorIVA'])
+            self.assertEqual([(l['codigoZeta'],l['ivaZeta']) for l in invoice['payload']['lineas']],[(code,'3'),(code,'3')])
+            self.assertEqual(allow_rounding(invoice['plan'])['lineas'][0]['totalEsperado'],'109.80')
+            self.store.decide(key,{'lines':{'1':{'ignore':True}}})
+            ignored=self.store.invoices()[0]
+            self.assertNotEqual(ignored['state'],'ready')  # No perder un descuento de 12,20.
+            self.assertEqual(ignored['payload']['lineasIgnoradas'],[1])
+            self.store.decide(key,{'lines':{'1':{'ignore':False}}})
+            self.assertEqual(self.store.invoices()[0]['state'],'ready')
+
+    def test_taxable_rounding_can_be_omitted_or_included_in_group(self):
+        from cargar_lote import allow_rounding
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo</NomItem><IndFact>1</IndFact><MontoItem>-0.25</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=xml(1601,'99.75',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntNoGrv>99.75</MntNoGrv>')
+        self.store.import_documents('round.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'article','code':'A1'}}})
+        omitted=self.store.invoices()[0]
+        self.assertTrue(omitted['payload']['agruparPorIVA'])
+        self.assertEqual(omitted['state'],'ready')
+        self.assertEqual(omitted['tax_groups'][0]['origenes'],[0])
+        self.assertEqual(allow_rounding(omitted['plan'])['lineas'][0]['totalEsperado'],'100.00')
+        self.store.decide(key,{'lines':{'1':{'ignore':False}}})
+        included=self.store.invoices()[0]
+        self.assertEqual(included['state'],'ready',included['reasons'])
+        self.assertEqual(included['auto_rounding_lines'],[])
+        self.assertEqual(allow_rounding(included['plan'])['lineas'][0]['totalEsperado'],'99.75')
+        self.store.decide(key,{'lines':{'1':{'ignore':True}}})
+        self.assertEqual(self.store.invoices()[0]['state'],'ready')
+
+    def test_automatic_vat_without_grouping_is_independent_of_catalog(self):
+        raw=xml(1602,'122',indicator='3').replace(b'<MntNoGrv>100</MntNoGrv>',
+            b'<MntNetoIVATasaBasica>100</MntNetoIVATasaBasica><MntIVATasaBasica>22</MntIVATasaBasica>')
+        self.store.import_documents('vat.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'concept','code':'G1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['state'],'ready')
+        self.assertEqual(invoice['payload']['lineas'][0]['ivaZeta'],'3')
+        self.assertNotIn('agruparPorIVA',invoice['payload'])
+
+    def test_manual_group_choice_is_remembered_for_supplier_and_vat(self):
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Descuento sin regla</NomItem><IndFact>1</IndFact><MontoItem>-10</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=xml(1604,'90',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntNoGrv>90</MntNoGrv>')
+        self.store.import_documents('group.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{str(i):{'kind':'concept','code':'G1','ivaZeta':'1'} for i in (0,1)}})
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM rules WHERE supplier=?',(SUPPLIER,)).fetchone()[0],2)
+        following=raw.replace(b'<Nro>1604</Nro>',b'<Nro>1605</Nro>').replace(b'Producto sint',b'Otro producto sint')
+        self.store.import_documents('next.xml',following)
+        nextkey=self.store.invoices()[0]['key']
+        self.store.decide(nextkey,{'mode':'credit'})
+        invoice=Store(self.directory).invoices()[0]
+        self.assertEqual(invoice['state'],'ready',invoice['reasons'])
+        self.assertEqual([l['codigoZeta'] for l in invoice['payload']['lineas']],['G1','G1'])
+
+    def test_group_does_not_overwrite_conflicting_explicit_destinations(self):
+        self.store.import_catalog([{'kind':'article','code':'B1','name':'Otro destino','vat':'1'}])
+        extra='<Item><NroLinDet>2</NroLinDet><NomItem>Otro</NomItem><IndFact>1</IndFact><MontoItem>10</MontoItem><Cantidad>1</Cantidad></Item>'
+        raw=xml(1603,'110',extra=extra).replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntNoGrv>110</MntNoGrv>')
+        self.store.import_documents('conflict.xml',raw)
+        key=self.store.invoices()[0]['key']
+        self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'article','code':'A1'},'1':{'kind':'article','code':'B1'}}})
+        invoice=self.store.invoices()[0]
+        self.assertEqual([l['codigoZeta'] for l in invoice['payload']['lineas']],['A1','B1'])
+        self.assertIn('un solo destino',' '.join(invoice['reasons']))
+
     def test_grouped_suspended_vat_requires_its_own_destination_and_balanced_totals(self):
         self.store.import_catalog([{'kind':'article','code':'S','name':'ALIMENTOS IVA en suspenso','vat':'12'}])
         raw=xml(628,indicator='12').replace(b'<MntNoGrv>100</MntNoGrv>',b'<MntIVaenSusp>100</MntIVaenSusp>')
@@ -609,7 +692,10 @@ class WorkflowTests(unittest.TestCase):
         self.store.decide(key,{'mode':'credit','groupByVat':True,'lines':{'0':{'kind':'article','code':'A1'}}})
         pending=self.store.invoices()[0]
         self.assertEqual(pending['rounding_adjustment'],{'monto':'-0.25','origenes':[1]})
-        self.assertIn('Elegí el destino del redondeo',' '.join(pending['reasons']))
+        self.assertEqual(pending['state'],'ready')
+        self.assertNotIn('ajusteRedondeo',pending['plan'])
+        self.store.decide(key,{'roundingMode':'load'})
+        self.assertEqual(self.store.invoices()[0]['plan']['lineas'][-1]['codigoZeta'],'R')
         self.store.decide(key,{'roundingDestination':{'kind':'article','code':'R'}})
         invoice=Store(self.directory).invoices()[0]
         self.assertEqual(invoice['state'],'ready')

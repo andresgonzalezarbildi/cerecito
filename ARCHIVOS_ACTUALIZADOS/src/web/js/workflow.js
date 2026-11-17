@@ -26,11 +26,11 @@ function updateNavigation(counts){
   $('reviewCount').textContent=pending;
   $('readyCount').textContent=counts.ready||0;
   document.querySelectorAll('.toolbar button').forEach(button=>{
-    const selected=button.id===({home:'summary',summary:'summary',results:'results',catalogs:'catalogs',review:reviewMode==='ready'?'readyReview':'review'}[page]);
+    const selected=button.id===({home:'summary',summary:'summary',results:'results',catalogs:'catalogs',comparison:'comparison',review:reviewMode==='ready'?'readyReview':'review'}[page]);
     button.classList.toggle('nav-active',selected);
     if(selected)button.setAttribute('aria-current','page');else button.removeAttribute('aria-current');
   });
-  const title=({home:'Tu lote de comprobantes',summary:'Resumen del lote',results:'Actividad e historial',catalogs:'Catálogos',review:reviewMode==='ready'?'Comprobantes listos':'Revisión de comprobantes'})[page];
+  const title=({home:'Tu lote de comprobantes',summary:'Resumen del lote',results:'Actividad e historial',catalogs:'Catálogos',comparison:'Comparar con Zeta',review:reviewMode==='ready'?'Comprobantes listos':'Revisión de comprobantes'})[page];
   $('stages').textContent=title;
 }
 function invoiceList(title,invoices,{open=false}={}){
@@ -53,6 +53,7 @@ function draw(){
   if(page==='catalogs'){catalogPage();return;}
   if(page==='review'){review();return;}
   if(page==='results'){results();return;}
+  if(page==='comparison'){comparisonPage();return;}
   const activeJob=state.jobs.find(j=>['queued','running','cancelling'].includes(j.status));
   const pending=state.invoices.filter(i=>i.state==='needs_review'||(i.state==='manual'&&!i.decision.reviewed));
   const ready=state.invoices.filter(i=>i.state==='ready');
@@ -60,7 +61,7 @@ function draw(){
   $('content').innerHTML=`<section class="card batch-overview"><div><p class="eyebrow">${batch?'LOTE ACTUAL':'COMENZAR'}</p><h2>${pending.length?'Continuá con los comprobantes pendientes':ready.length?'Tus comprobantes están preparados':'Todo en un solo lugar'}</h2>
     <p class="muted">${batch?`${pending.length} por revisar · ${ready.length} listos para cargar · ${(counts.loaded||0)+(counts.existing||0)} registrados en Zeta`:'Importá un ZIP o XML de FacturaLista para comenzar.'}</p></div>
     <div class="actions"><button id="reviewPending" ${!pending.length?'disabled':''}>Resolver pendientes</button><button class="primary" id="load" ${!ready.length||activeJob?'disabled':''}>${activeJob?'Trabajo en curso…':'Cargar comprobantes'}</button></div>
-    <div class="batch-tools"><button id="checkExisting" ${!batch||activeJob?'disabled':''}>Buscar ya cargadas</button><button id="verify" ${!ready.length||activeJob?'disabled':''}>Verificar antes de cargar</button></div></section>`+
+    <div class="batch-tools"><button id="compareBatch" ${!batch?'disabled':''}>Comparar ZIP con Zeta</button><button id="checkExisting" ${!batch||activeJob?'disabled':''}>Buscar ya cargadas</button><button id="verify" ${!ready.length||activeJob?'disabled':''}>Verificar antes de cargar</button></div></section>`+
     invoiceList('Necesitan tu atención',pending,{open:true})+
     invoiceList('Listos para cargar · revisar si querés',ready)+
     invoiceList('Ya registrados en Zeta',state.invoices.filter(i=>['existing','loaded'].includes(i.state)))+
@@ -71,6 +72,7 @@ function draw(){
   document.querySelectorAll('[data-restore]').forEach(button=>button.onclick=()=>decide(button.dataset.restore,{skip:false,skipSupplier:false}));
   $('reviewPending').onclick=()=>openReview();
   $('checkExisting').onclick=precheck;
+  $('compareBatch').onclick=()=>{page='comparison';draw();};
   $('verify').onclick=()=>start(false);
   $('load').onclick=()=>start(true);
 }
@@ -97,7 +99,7 @@ async function decide(key,patch,advance=false){
   });
   controls.filter(e=>e.isConnected).forEach(e=>e.disabled=false);
 }
-function review(){const pending=reviewQueue();if(!pending.length){page='summary';draw();return;}cursor=Math.min(cursor,pending.length-1);if(focusKey){const pos=pending.findIndex(i=>i.key===focusKey);if(pos>=0)cursor=pos;}const i=pending[cursor],s=i.source,d=i.decision;focusKey=i.key;$('content').innerHTML=`<section class="card" data-invoice-key="${esc(i.key)}"><div class="invoice-head"><div><p class="muted">Revisión ${cursor+1} de ${pending.length}</p><h2>${esc(s.nombre)}</h2><p>RUT ${esc(s.rut)} · ${esc(s.serie)}/${esc(s.numero)} · ${esc(s.fecha)}</p>${reviewPicker(pending,i)}</div><div><h2>${esc(s.moneda)} ${esc(s.totales.total)}</h2><span class="badge">${esc(i.state==='manual'?labels.manual:i.form)}</span></div></div><div class="warning">${i.reasons.map(esc).join('<br>')}</div><div class="fields"><label>Crédito / Contado<select id="mode" ${i.modeLocked?'disabled title="Crédito según el XML"':''}>${i.modePending?'<option value="" selected>Corroborar modalidad...</option>':''}<option value="credit" ${!i.modePending&&i.mode==='credit'?'selected':''}>Crédito</option><option value="cash" ${!i.modePending&&i.mode==='cash'?'selected':''}>Contado</option></select></label><label>Proveedor<select id="supplier">${options('supplier',d.supplier||i.payload.proveedor.codigoZeta)}</select></label><label>Centro de costos (opcional)<select id="center">${options('center',d.center??i.suggested_center,'Sin centro')}</select></label>${i.mode==='cash'?`<label>Forma de pago<select id="payment">${options('payment',d.payment||i.paymentCode,i.paymentDefault?'Efectivo por defecto':'Elegir...')}</select></label>`:''}</div><div id="identity"></div>${s.lineas.map((l,n)=>lineHTML(i,l,n)).join('')}<div class="actions"><button id="previous" ${cursor===0?'disabled':''}>Anterior</button><button id="skip">Saltear</button><button class="primary" id="confirm">${i.state==='manual'?'Dejar para carga manual y seguir':'Confirmar y siguiente'}</button></div><p class="muted">Cada cambio se guarda inmediatamente.</p></section>`;const picker=$('reviewInvoice');if(picker)picker.onchange=()=>{saveDraft();focusKey=picker.value;draw();restoreDraft();};for(const field of ['mode','supplier','center','payment'])if($(field))$(field).onchange=()=>decide(i.key,{[field]:$(field).value});const supplier=state.catalog.find(c=>c.kind==='supplier'&&c.code===(d.supplier||i.payload.proveedor.codigoZeta));if(supplierNeedsConfirmation(i,supplier)){$('identity').innerHTML=`<div class="warning">Zeta: ${esc(supplier.code)} · ${esc(supplier.name)} · RUT vacío<br>XML: ${esc(s.nombre)} · RUT ${esc(s.rut)}<p><button id="approve">Confirmar relación</button></p></div>`;$('approve').onclick=()=>action(async()=>{await api('supplier/confirm',{key:i.key,code:supplier.code});await refresh();});}for(let n=0;n<s.lineas.length;n++){const ignore=$('ignore'+n);if(ignore)ignore.onclick=()=>decide(i.key,{lines:{[n]:{ignore:!(d.lines?.[n]?.ignore===true||i.auto_ignored_lines?.includes(n))}}});const search=$('search'+n);if(!search)continue;search.oninput=()=>renderChoices(i,n,search.value,$('kind'+n).value);$('kind'+n).onchange=()=>renderChoices(i,n,search.value,$('kind'+n).value);renderChoices(i,n,'',$('kind'+n).value);if($('rule'+n))$('rule'+n).onclick=()=>action(async()=>{await api('rule',{key:i.key,index:n});$('notice').textContent='Regla confirmada para esta empresa, proveedor e IVA.';});}$('previous').onclick=previousReview;$('skip').onclick=()=>decide(i.key,{skip:true},true);$('confirm').onclick=()=>{if(i.state!=='manual'&&i.reasons.length){$('notice').textContent='Resolvé los campos indicados o salteá esta factura.';return;}decide(i.key,{reviewed:true},true);};}
+function review(){const pending=reviewQueue();if(!pending.length){page='summary';draw();return;}cursor=Math.min(cursor,pending.length-1);if(focusKey){const pos=pending.findIndex(i=>i.key===focusKey);if(pos>=0)cursor=pos;}const i=pending[cursor],s=i.source,d=i.decision;focusKey=i.key;$('content').innerHTML=`<section class="card" data-invoice-key="${esc(i.key)}"><div class="invoice-head"><div><p class="muted">Revisión ${cursor+1} de ${pending.length}</p><h2>${esc(s.nombre)}</h2><p>RUT ${esc(s.rut)} · ${esc(s.serie)}/${esc(s.numero)} · ${esc(s.fecha)}</p>${reviewPicker(pending,i)}</div><div><h2>${esc(s.moneda)} ${esc(s.totales.total)}</h2><span class="badge">${esc(i.state==='manual'?labels.manual:i.form)}</span></div></div><div class="warning">${i.reasons.map(esc).join('<br>')}</div><div class="fields"><label>Crédito / Contado<select id="mode" ${i.modeLocked?'disabled title="Crédito según el XML"':''}>${i.modePending?'<option value="" selected>Corroborar modalidad...</option>':''}<option value="credit" ${!i.modePending&&i.mode==='credit'?'selected':''}>Crédito</option><option value="cash" ${!i.modePending&&i.mode==='cash'?'selected':''}>Contado</option></select></label><label>Proveedor<select id="supplier">${options('supplier',d.supplier||i.payload.proveedor.codigoZeta)}</select></label><label>Centro de costos (opcional)<select id="center">${options('center',d.center??i.suggested_center,'Sin centro')}</select></label>${i.mode==='cash'?`<label>Forma de pago<select id="payment">${options('payment',d.payment||i.paymentCode,i.paymentDefault?'Efectivo por defecto':'Elegir...')}</select></label>`:''}</div><div id="identity"></div>${s.lineas.map((l,n)=>lineHTML(i,l,n)).join('')}<div class="actions"><button id="previous" ${cursor===0?'disabled':''}>Anterior</button><button id="skip">Saltear</button><button class="primary" id="confirm">${i.state==='manual'?'Dejar para carga manual y seguir':'Confirmar y siguiente'}</button></div><p class="muted">Cada cambio se guarda inmediatamente.</p></section>`;const picker=$('reviewInvoice');if(picker)picker.onchange=()=>{saveDraft();focusKey=picker.value;draw();restoreDraft();};for(const field of ['mode','supplier','center','payment'])if($(field))$(field).onchange=()=>decide(i.key,{[field]:$(field).value});const supplier=state.catalog.find(c=>c.kind==='supplier'&&c.code===(d.supplier||i.payload.proveedor.codigoZeta));if(supplierNeedsConfirmation(i,supplier)){$('identity').innerHTML=`<div class="warning">Zeta: ${esc(supplier.code)} · ${esc(supplier.name)} · RUT vacío<br>XML: ${esc(s.nombre)} · RUT ${esc(s.rut)}<p><button id="approve">Confirmar relación</button></p></div>`;$('approve').onclick=()=>action(async()=>{await api('supplier/confirm',{key:i.key,code:supplier.code});await refresh();});}for(let n=0;n<s.lineas.length;n++){const ignore=$('ignore'+n);if(ignore)ignore.onclick=()=>decide(i.key,{lines:{[n]:{ignore:!(d.lines?.[n]?.ignore===true||i.auto_ignored_lines?.includes(n)||i.auto_rounding_lines?.includes(n))}}});const search=$('search'+n);if(!search)continue;search.oninput=()=>renderChoices(i,n,search.value,$('kind'+n).value);$('kind'+n).onchange=()=>renderChoices(i,n,search.value,$('kind'+n).value);renderChoices(i,n,'',$('kind'+n).value);if($('rule'+n))$('rule'+n).onclick=()=>action(async()=>{await api('rule',{key:i.key,index:n});$('notice').textContent='Regla confirmada para esta empresa, proveedor e IVA.';});}$('previous').onclick=previousReview;$('skip').onclick=()=>decide(i.key,{skip:true},true);$('confirm').onclick=()=>{if(i.state!=='manual'&&i.reasons.length){$('notice').textContent='Resolvé los campos indicados o salteá esta factura.';return;}decide(i.key,{reviewed:true},true);};}
 function lineHTML(i,l,n){const choice=i.decision.lines?.[n]||i.proposals[n]?.rule,chosen=state.catalog.find(c=>c.kind===choice?.kind&&c.code===choice?.code);return `<div class="line"><h3>${n+1} · ${esc(l.descripcion)}</h3><p class="muted">Cantidad ${esc(l.cantidad)} · Importe ${esc(l.monto)} · IVA original ${esc(l.indicadorIVA)} · ${esc(i.proposals[n]?.reason)}</p>${chosen?`<p class="badge">Elegida: ${esc(chosen.code)} · ${esc(chosen.name)}</p>`:''}${choice?.ignore?'<p>Línea ignorada; el XML se conserva.</p>':''}<div class="fields"><label>Destino<select id="kind${n}"><option value="article">Artículo</option><option value="concept" ${choice?.kind==='concept'?'selected':''}>Gasto</option></select></label><label>Buscar código o descripción<input id="search${n}" placeholder="Escribí para buscar"></label></div><div class="choices" id="choices${n}"></div><p>${['6','7'].includes(l.indicadorIVA)?`<button id="ignore${n}">${choice?.ignore?'Volver a incluir':'Ignorar línea'}</button>`:''}${chosen?` <button id="rule${n}">Usar también como regla futura</button>`:''}</p></div>`;}
 function supportsVat(destination,indicator){
   return (Array.isArray(destination?.vat)?destination.vat:String(destination?.vat||'').split('|')).includes(indicator);
@@ -124,7 +126,7 @@ async function setLine(i,n,choice){
   const controls=Array.from(document.querySelectorAll('#content button,#content select')).filter(e=>!e.disabled);controls.forEach(e=>e.disabled=true);
   await action(async()=>{
     const destination=state.catalog.find(c=>c.kind===choice.kind&&c.code===choice.code);
-    const learn=!!destination&&!choice.ivaZeta&&supportsVat(destination,i.source.lineas[n].indicadorIVA);
+    const learn=!!destination&&(!choice.ivaZeta||choice.ivaZeta===i.source.lineas[n].indicadorIVA)&&supportsVat(destination,i.source.lineas[n].indicadorIVA);
     await api('decision',{key:i.key,patch:{lines:{[n]:choice}},learn_lines:learn});
     await refresh();
     if(choice.kind&&choice.code)$('notice').textContent=learn&&!i.finesa?'Elección aprendida para próximas facturas.':'Elección guardada para este comprobante.';
@@ -277,11 +279,11 @@ function historyMatches(item,latest){
 }
 function results(){
   const statusNames={queued:'En espera',running:'Procesando',cancelling:'Finalizando el comprobante actual',cancelled:'Cancelado',finished:'Finalizado',failed:'Requiere atención',interrupted:'Interrumpido'};
-  const active=state.jobs.find(job=>['queued','running','cancelling'].includes(job.status));
+  const active=state.jobs.find(job=>job.data.kind!=='comparison'&&['queued','running','cancelling'].includes(job.status));
   const title=job=>job.data.precheck?'Búsqueda en Zeta':job.data.save?'Carga de comprobantes':'Verificación';
   const latest=latestHistoryResults();
   const filters=[['pending','Pendientes'],['loaded','Cargadas'],['not_loaded','No cargadas'],['review','Revisar en Zeta'],['all','Todas']];
-  const jobs=state.jobs.map(job=>({job,items:(job.data.items||[]).filter(item=>historyMatches(item,latest))}))
+  const jobs=state.jobs.filter(job=>job.data.kind!=='comparison').map(job=>({job,items:(job.data.items||[]).filter(item=>historyMatches(item,latest))}))
     .filter(({job,items})=>items.length||((job.data.error||['failed','interrupted'].includes(job.status)||(job.status==='cancelled'&&job.data.done<job.data.total))&&['pending','all'].includes(historyFilter)));
   $('content').innerHTML=(active?`<section class="card job-progress"><p class="eyebrow">EN CURSO</p><h2>${title(active)}</h2><progress max="${active.data.total||1}" value="${active.data.done}"></progress><p>${active.data.done} de ${active.data.total} comprobantes procesados</p><button data-cancel="${esc(active.id)}">Cancelar después de esta factura</button></section>`:'')+
     `<div class="history-filters" role="group" aria-label="Filtrar resultados">${filters.map(([value,label])=>`<button data-history-filter="${value}" aria-pressed="${historyFilter===value}" class="${historyFilter===value?'primary':''}">${label}</button>`).join('')}</div>`+
@@ -314,7 +316,7 @@ async function pollJobs(){
   const waiting=page==='review'&&!!$('precheckProgress');
   if(!waiting&&!state.jobs.some(j=>['queued','running','cancelling'].includes(j.status)))return;
   pollingJobs=true;
-  try{await action(()=>refresh(['results','summary','home'].includes(page)||waiting));}finally{pollingJobs=false;}
+  try{await action(()=>refresh(['results','summary','home','comparison'].includes(page)||waiting));}finally{pollingJobs=false;}
 }
 setInterval(pollJobs,1500);
 

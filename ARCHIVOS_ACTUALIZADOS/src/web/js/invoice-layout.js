@@ -36,17 +36,18 @@ async function copyReviewReport(invoice){
 }
 
 lineHTML=function(i,l,n){
-  const choice=i.decision.lines?.[n]||i.proposals[n]?.rule;
+  const effective=i.payload.lineas.find(line=>line.origenes.includes(n));
+  const choice=i.decision.lines?.[n]?.ignore?i.decision.lines[n]:(effective?{kind:effective.tipoDestino,code:effective.codigoZeta,ivaZeta:effective.ivaZeta}:i.decision.lines?.[n]||i.proposals[n]?.rule);
   const chosen=state.catalog.find(c=>c.kind===choice?.kind&&c.code===choice?.code);
   const tax={'1':'Exento','2':'10%','3':'22%','5':'Entrega gratuita (sin IVA)','6':'No facturable','7':'No facturable','11':'Impuesto percibido','12':'IVA en suspenso'}[l.indicadorIVA]||'Indicador fiscal '+l.indicadorIVA;
   if(i.auto_rounding_lines?.includes(n)){
-    const groupedRounding=i.rounding_adjustment?.origenes.includes(n);
-    return `<div class="invoice-row ignored"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>${groupedRounding?'El ajuste se carga en un renglón separado.':'Redondeo omitido por defecto; se conserva en el XML.'}</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>${groupedRounding?'Elegí el destino en Agrupar por IVA':'No requiere destino'}</small></div></div>`;
+    const groupedRounding=i.rounding_mode==='load'&&i.rounding_adjustment?.origenes.includes(n);
+    return `<div class="invoice-row ignored"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>${groupedRounding?'El ajuste se carga en un renglón separado.':'Redondeo omitido por defecto; se conserva en el XML.'}</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment"><small>${groupedRounding?'Destino elegido en Agrupar por IVA':'No requiere destino'}</small>${['1','2','3'].includes(l.indicadorIVA)?`<button class="text-button" id="ignore${n}">Cargar en su grupo de IVA</button>`:''}</div></div>`;
   }
   const ignored=choice?.ignore===true||i.auto_ignored_lines?.includes(n);
   if(ignored||!['1','2','3','6','7'].includes(l.indicadorIVA)){
     const message=ignored?(i.proposals[n]?.reason||'Línea ignorada. Se conserva en el XML.'):(i.proposals[n]?.reason||'');
-    const canIgnore=Number(l.monto)===0||['6','7'].includes(l.indicadorIVA);
+    const canIgnore=Number(l.monto)<=0||['6','7'].includes(l.indicadorIVA);
     return `<div class="invoice-row ${ignored?'ignored':''}"><div class="line-description"><span class="line-number">${n+1}</span><div><strong>${esc(l.descripcion)}</strong><small>${esc(message)}</small></div></div><div class="numeric" data-label="Cantidad">${esc(l.cantidad)}</div><div class="numeric" data-label="IVA">${esc(tax)}</div><div class="numeric" data-label="Importe">${esc(l.monto)}</div><div class="line-assignment">${canIgnore?`<button class="text-button" id="ignore${n}">${ignored?'Volver a incluir':'Ignorar línea'}</button>`:''}</div></div>`;
   }
   return `<div class="invoice-row ${choice?.ignore?'ignored':''}">
@@ -58,10 +59,10 @@ lineHTML=function(i,l,n){
       <div class="line-editor"><label hidden>Tipo<select id="kind${n}"><option value="article">Artículo</option><option value="concept" ${(i.decision.destinationKind||choice?.kind)==='concept'?'selected':''}>Gasto</option></select></label>
       <label>Buscar destino<input id="search${n}" placeholder="Código o descripción"></label>
       <div class="choices" id="choices${n}"></div>
-      ${['1','2','3'].includes(l.indicadorIVA)?`<label>IVA en Zeta<select id="lineVat${n}">${zetaVatOptions(choice?.ivaZeta)}</select></label>`:''}
+      ${['1','2','3'].includes(l.indicadorIVA)?`<label>IVA en Zeta<select id="lineVat${n}">${zetaVatOptions(choice?.ivaZeta||l.indicadorIVA)}</select></label>`:''}
       <small class="muted">${esc(i.proposals[n]?.reason||'')}</small>
       <small class="muted">El IVA elegido se guarda para este comprobante.</small></div></details>
-      ${Number(l.monto)===0||['6','7'].includes(l.indicadorIVA)?`<button class="text-button" id="ignore${n}">Ignorar línea</button>`:''}
+      ${Number(l.monto)<=0||['6','7'].includes(l.indicadorIVA)?`<button class="text-button" id="ignore${n}">Ignorar línea</button>`:''}
     </div></div>`;
 };
 
@@ -198,7 +199,8 @@ function addTaxGrouping(invoice,before){
   const formatter=new Intl.NumberFormat('es-UY',{minimumFractionDigits:2,maximumFractionDigits:2});
   const fmt=value=>value==null?'':formatter.format(value);
   const adjustment=invoice.rounding_adjustment;
-  const savedAdjustment=invoice.decision.roundingDestination;
+  const savedAdjustment=invoice.rounding_destination||invoice.decision.roundingDestination;
+  const loadRounding=invoice.rounding_mode==='load';
   const adjustmentOptions=adjustment&&!manual?state.catalog.filter(c=>c.kind===kind)
     .sort((a,b)=>Number(/redondeo/i.test(b.name))-Number(/redondeo/i.test(a.name))):[];
   function destination(group){
@@ -220,12 +222,15 @@ function addTaxGrouping(invoice,before){
     <div class="catalog-table"><table><thead><tr><th>Grupo</th><th>Base</th><th>IVA</th><th>Importe</th>${manual?'':'<th>Destino en Zeta</th>'}</tr></thead>
     <tbody>${groups.map(g=>`<tr><td>${esc(g.etiqueta)}</td><td>${esc(fmt(g.base))}</td><td>${esc(fmt(g.impuesto))}</td><td>${esc(fmt(g.importe))}</td>${manual?'':`<td>${destination(g)}</td>`}</tr>`).join('')}</tbody></table></div>
     <p class="muted">Total fiscal del XML · ${esc(invoice.source.moneda)} ${esc(fmt(invoice.source.totales.total))}${invoice.source.totales.pagar? ` · Importe a pagar ${esc(fmt(invoice.source.totales.pagar))}`:''}</p>
-    ${adjustment&&!manual?`<label>Destino del redondeo en Zeta · ${esc(invoice.source.moneda)} ${esc(fmt(adjustment.monto))} · Sin IVA
+    ${invoice.plan?.totalesZeta&&Number(invoice.plan.totalesZeta.total)!==Number(invoice.source.totales.total)?`<p>Total a cargar en Zeta con los ajustes elegidos · <strong>${esc(invoice.source.moneda)} ${esc(fmt(invoice.plan.totalesZeta.total))}</strong></p>`:''}
+    ${adjustment&&!manual?`<label>Redondeo<select id="roundingMode"><option value="ignore" ${!loadRounding?'selected':''}>Ignorar dentro de la tolerancia</option><option value="load" ${loadRounding?'selected':''}>Cargar como renglón separado</option></select></label><label ${loadRounding?'':'hidden'}>Destino del redondeo en Zeta · ${esc(invoice.source.moneda)} ${esc(fmt(adjustment.monto))} · Sin IVA
       <select id="roundingDestination"><option value="">Elegí el destino que usás para redondeos…</option>${adjustmentOptions.map(c=>`<option value="${esc(c.code)}" ${savedAdjustment?.kind===kind&&savedAdjustment.code===c.code?'selected':''}>${esc(c.code)} · ${esc(c.name)}</option>`).join('')}</select>
     </label>`:''}
     <button type="button" id="copyTaxGrouping">Copiar resumen</button>`);
+  const roundingMode=$('roundingMode');
+  if(roundingMode)roundingMode.onchange=()=>decide(invoice.key,{roundingMode:roundingMode.value});
   const rounding=$('roundingDestination');
-  if(rounding)rounding.onchange=()=>decide(invoice.key,{roundingDestination:rounding.value?{kind,code:rounding.value}:null});
+  if(rounding)rounding.onchange=()=>decide(invoice.key,{roundingMode:'load',roundingDestination:rounding.value?{kind,code:rounding.value}:null});
   panel.querySelectorAll('[data-tax-group],[data-group-vat]').forEach(select=>select.onchange=()=>{
     const vat=select.dataset.taxGroup||select.dataset.groupVat;
     const code=panel.querySelector(`[data-tax-group="${vat}"]`).value;
@@ -233,7 +238,7 @@ function addTaxGrouping(invoice,before){
     const ivaZeta=panel.querySelector(`[data-group-vat="${vat}"]`).value;
     const group=groups.find(g=>g.iva===vat);
     const lines=Object.fromEntries(group.origenes.map(index=>[index,{kind,code,...(ivaZeta?{ivaZeta}:{})}]));
-    decide(invoice.key,{lines});
+    decide(invoice.key,{groupByVat:true,lines});
   });
   $('copyTaxGrouping').onclick=()=>action(async()=>{
     const s=invoice.source;

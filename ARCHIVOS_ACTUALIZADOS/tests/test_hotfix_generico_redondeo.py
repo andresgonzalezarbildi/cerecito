@@ -105,7 +105,8 @@ class HotfixTests(unittest.TestCase):
         self.store.import_documents('discount.xml',xml(614,'99.99',extra=extra))
         i=self.chosen()
         self.assertEqual(i['auto_rounding_lines'],[])
-        self.assertNotEqual(i['state'],'ready')
+        self.assertEqual(i['state'],'ready')
+        self.assertEqual(i['plan']['lineas'][0]['origenes'],[0,1])
 
     def test_redondeo_de_cinco_pesos_no_se_omite(self):
         extra='<Item><NroLinDet>2</NroLinDet><NomItem>Redondeo</NomItem><IndFact>1</IndFact><MontoItem>-5</MontoItem><Cantidad>1</Cantidad></Item>'

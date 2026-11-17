@@ -1,4 +1,4 @@
-﻿CERECITO | ACTUALIZACION DEL 13/11/2026
+﻿CERECITO | ACTUALIZACION DEL 17/11/2026
 
 Instalación
 1. Cerrá Cerecito.
@@ -7,6 +7,40 @@ Instalación
 4. Abrí Cerecito otra vez. Si la vista anterior sigue abierta, presioná Ctrl+F5.
 
 El instalador crea un respaldo de los archivos que actualiza.
+
+Comparación automática del ZIP con Zeta
+En el menú lateral, abrí Comparar con Zeta y pulsá Exportar de Zeta y comparar.
+También podés abrir esta pantalla desde Resumen, Comparar ZIP con Zeta.
+Se usa el ZIP que ya está importado en Cerecito, sin seleccionarlo de nuevo.
+La fecha desde se toma de la emisión más antigua dentro del ZIP, aunque sea
+anterior al período del nombre del archivo. Hasta incluye hoy y cualquier
+comprobante posterior que estuviera en el ZIP.
+
+Cerecito abre la empresa configurada, aplica las fechas, vacía la búsqueda
+por número y pulsa Excel (BTNEXPORT) en Compras de Zeta. No recorre páginas
+ni busca el comprobante de control para esta exportación.
+Iniciá sesión en el Chrome que usa Cerecito.
+
+El comparador se abre dentro de Cerecito y muestra Faltan cargar y Para revisar.
+Conserva los filtros del HTML anterior: cobranzas, total fiscal cero, Scotia,
+Compañía Uruguaya de Medios de Procesamiento y repeticiones del mismo CFE en ZIP.
+Las posibles cargas duplicadas en Zeta y los XML con problemas siguen siendo
+casos para revisar. El informe Excel incluye todos los resultados.
+Podés descargar también el Excel original de Zeta desde esa pantalla.
+
+El archivo descargado se conserva con su nombre y extensión en los datos de
+Cerecito para hacer la comparación. Al terminar o cancelar se restaura el
+comportamiento normal de Descargas de Chrome.
+La comparación queda vinculada al lote actual. Al cambiar de ZIP no se muestran
+resultados del lote anterior. Actualizar comparación vuelve a descargar Zeta;
+usalo después de cargar o corregir comprobantes para obtener el estado nuevo.
+El Excel descargado se carga directamente al comparador integrado, sin
+contar ni revisar las páginas de Zeta. La descarga reutiliza la conexión
+activa de Chrome, pulsa Excel una vez y detecta el archivo terminado en
+la carpeta del trabajo, sin esperar eventos de descarga ni abrir otra
+conexión de depuración. Si no aparece en 45 segundos, muestra un aviso.
+Se restaura el comportamiento normal de Descargas al finalizar.
+Los trabajos de exportación y los de carga se ejecutan de a uno.
 
 Distribución de pantalla
 Destinos por IVA comienza cerrado al abrir cada comprobante.
@@ -36,12 +70,34 @@ Las líneas de importe cero vienen ignoradas y tienen Volver a incluir.
 La decisión se aplica también a los comprobantes del lote ya importado.
 
 Agrupación por IVA y descuentos
-El IVA inicial del grupo se toma del XML, independientemente del artículo
-o concepto elegido. El selector sigue disponible para editarlo. Cerecito
-comprueba que los importes fiscales cuadren con el XML.
-Las facturas con líneas negativas se proponen agrupadas por IVA. Los importes
-negativos restan del grupo correspondiente, conservando su base e impuesto.
-Podés quitar la agrupación. La carga con descuentos requiere agrupar por IVA.
+La agrupación se propone desde el inicio cuando hay descuentos negativos,
+cantidades no positivas, redondeos, IVA en suspenso o impuesto percibido.
+Si ya habías elegido quitar la agrupación para una factura, esa elección se
+conserva. Podés volver a activarla desde Agrupar por IVA.
+
+Se proponen los destinos de las reglas confirmadas, del sector, de las líneas
+ya elegidas y de coincidencias exactas sin ambigüedad. Un descuento sin destino
+hereda el del grupo cuando hay uno solo. Se buscan también las variantes de
+IVA de la misma familia. Las elecciones distintas no se reemplazan por otra.
+Los destinos elegidos manualmente en un grupo quedan aprendidos para ese
+proveedor, descripción e IVA. El sistema no aprende inferencias automáticas.
+
+El IVA de Zeta se completa según el XML, también sin agrupar, independientemente
+del IVA predeterminado del artículo o concepto. El selector sigue editable y
+se verifica que la elección conserve el impuesto del XML.
+
+Las líneas negativas se descuentan de la base e impuesto de su grupo.
+Se puede elegir Ignorar línea y Volver a incluir. Una omisión que exceda la
+tolerancia o altere un impuesto especial mantiene la revisión del comprobante.
+
+Los redondeos pequeños se omiten inicialmente. En redondeos fiscales aparece
+Cargar en su grupo de IVA. En ajustes no facturables del importe a pagar,
+Redondeo permite ignorar dentro de la tolerancia o cargar como renglón separado.
+Al cargar, se propone el destino si hay un único artículo o concepto de
+redondeo del mismo tipo que la factura. Podés cambiarlo.
+El total original del XML se conserva. Si una omisión autorizada cambia el
+importe a cargar, se muestra el total que se usará en Zeta y se controla
+exactamente contra las líneas del plan.
 
 Impuesto percibido y carga manual
 Los grupos de impuesto percibido (indicador 11 del XML) permiten elegir
@@ -98,5 +154,8 @@ de nuevo desde Abrir conexión con Zeta.
 Verificación
 Incluye las correcciones anteriores de Finesa, correlaciones, intentos
 interrumpidos, notas de crédito y redondeo separado.
-Se comprobaron los cálculos y la navegación con pruebas automáticas.
+Se comprobaron cálculos, navegación, serialización, cancelación, aislamiento
+de lotes y descargas con pruebas automáticas. El comparador integrado leyó
+un ZIP y un Excel reales de Zeta en pruebas locales. La exportación en una
+sesión real de Zeta sigue pendiente de comprobar.
 La comprobación visual completa en navegador quedó pendiente en este entorno.

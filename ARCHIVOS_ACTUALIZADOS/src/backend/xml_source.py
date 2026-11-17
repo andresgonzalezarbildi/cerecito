@@ -164,7 +164,10 @@ def read_zip(path):
 
 
 def can_ignore_line(line):
-    return line['indicadorIVA'] in {'6','7'} or decimal_value(line['monto']) == 0
+    amount=decimal_value(line['monto'])
+    return (line['indicadorIVA'] in {'6','7'} or amount<=0 or
+            (abs(amount)<=1 and re.match(r'^(?:redondeo\b|(?:ajuste|diferencia)\s+(?:(?:de|por)\s+)?redondeo\b)',
+                                         line.get('descripcion','').strip(),re.I)))
 
 
 def zero_line_indices(source):
@@ -190,7 +193,7 @@ def ignored_line_indices(source, invoice):
         if index<0 or index>=len(source['lineas']):
             raise SourceError('Línea ignorada fuera del XML.')
         if not can_ignore_line(source['lineas'][index]):
-            raise SourceError('Solo se pueden ignorar líneas de importe cero o líneas no facturables (indicadores 6/7).')
+            raise SourceError('Solo se pueden ignorar líneas en cero, negativas, redondeos pequeños o no facturables.')
     included={index for line in invoice.get('lineas',[]) for index in line.get('origenes',[])}
     return sorted(set(indices) | (set(zero_line_indices(source))-included))
 
@@ -241,8 +244,8 @@ def payable_rounding(source, indices, tolerance):
     if not delta or abs(delta)>min(tolerance,Decimal('1.00')):
         return None
     origins=[i for i in indices if source['lineas'][i]['indicadorIVA'] in {'6','7'}]
-    amount=sum((abs(decimal_value(source['lineas'][i]['monto']))*
-                (-1 if source['lineas'][i]['indicadorIVA']=='7' else 1) for i in origins),Decimal(0))
+    amount=sum(((-abs(decimal_value(source['lineas'][i]['monto'])) if source['lineas'][i]['indicadorIVA']=='7'
+                 else decimal_value(source['lineas'][i]['monto'])) for i in origins),Decimal(0))
     if origins and amount==delta:
         return {'monto':str(delta),'origenes':sorted(origins)}
     return None
@@ -341,7 +344,7 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     manual_ignored=ignored_line_indices(source,invoice)
     included={index for line in invoice['lineas'] for index in line.get('origenes',[])}
     no_monetarias=[i for i in non_monetary_line_indices(source) if i not in included]
-    auto_rounding=[i for i in rounding_line_indices(source,rounding_tolerance) if i not in manual_ignored]
+    auto_rounding=[i for i in rounding_line_indices(source,rounding_tolerance) if i not in manual_ignored and i not in included]
     assigned=sorted(set(manual_ignored) | set(no_monetarias) | set(auto_rounding))
     grouped=invoice.get('agruparPorIVA') is True
     result=[]
@@ -388,16 +391,20 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
     adjustment=None
     if grouped:
         result=group_plan_by_vat(result)
-        adjustment=payable_rounding(source,auto_rounding,rounding_tolerance)
-        rounding_tolerance=Decimal(0)
+        candidate=payable_rounding(source,rounding_line_indices(source,rounding_tolerance),rounding_tolerance)
         if 'pagar' in source['totales'] and cents(source['totales']['pagar'])!=cents(source['totales']['total']):
-            if not adjustment:
+            load_rounding=invoice.get('cargarRedondeo') is True or bool(invoice.get('destinoRedondeo'))
+            if not load_rounding and candidate and abs(cents(source['totales']['pagar'])-cents(source['totales']['total']))<=rounding_tolerance:
+                pass
+            elif not candidate:
                 raise SourceError('El importe a pagar difiere del total fiscal. Zeta requiere registrar el ajuste por separado para conservar ambos importes.')
-            target=invoice.get('destinoRedondeo')
-            if not isinstance(target,dict) or not str(target.get('codigoZeta','')).strip() or not str(target.get('descripcionZeta','')).strip():
-                raise SourceError('Elegí el destino del redondeo de '+adjustment['monto']+' en Agrupar por IVA.')
-            if {line['tipoDestino'] for line in result}!={target.get('tipoDestino')}:
-                raise SourceError('El redondeo debe usar el mismo tipo de destino que el resto de la factura.')
+            else:
+                adjustment=candidate
+                target=invoice.get('destinoRedondeo')
+                if not isinstance(target,dict) or not str(target.get('codigoZeta','')).strip() or not str(target.get('descripcionZeta','')).strip():
+                    raise SourceError('Elegí el destino del redondeo de '+adjustment['monto']+' en Agrupar por IVA.')
+                if {line['tipoDestino'] for line in result}!={target.get('tipoDestino')}:
+                    raise SourceError('El redondeo debe usar el mismo tipo de destino que el resto de la factura.')
     for line in result:
         bases[line['indicadorIVA']]+=decimal_value(line['baseEsperada'])
         taxes[line['indicadorIVA']]+=decimal_value(line['ivaEsperado'])
@@ -443,4 +450,10 @@ def preview_net_lines(source, invoice, expected_receiver, rounding_tolerance=Dec
         plan['totalesZeta']={**plan['totalesXML'],
                            'neto':str(decimal_value(plan['totalesXML']['neto'])+amount),
                            'total':str(cents(source['totales']['pagar']))}
+    if grouped and differences:
+        # La omisión autorizada conserva XML y diferencia. En Zeta se exige
+        # exactamente el total de las líneas que efectivamente se van a cargar.
+        net=sum(bases.values())+(decimal_value(adjustment['monto']) if adjustment else Decimal(0))
+        tax=sum(taxes.values())
+        plan['totalesZeta']={'neto':str(net),'iva':str(tax),'total':str(net+tax)}
     return plan

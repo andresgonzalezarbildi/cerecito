@@ -5,7 +5,7 @@ import json
 import mimetypes
 import os
 import sys
-from urllib.parse import urlsplit,unquote
+from urllib.parse import urlsplit,unquote,parse_qs
 import shutil
 import subprocess
 import time
@@ -37,6 +37,21 @@ class Handler(SimpleHTTPRequestHandler):
         if urlsplit('http://'+self.headers.get('Host','')).hostname not in {'localhost','127.0.0.1'}:
             self.reply({'error':'Host local requerido.'},403);return
         path=unquote(urlsplit(self.path).path)
+        if path=='/api/comparison/file':
+            if self.headers.get('X-Cerecito-Token')!=SESSION_TOKEN:
+                self.reply({'error':'Sesión inválida. Recargá Cerecito.'},403);return
+            try:
+                _,jobs=services()
+                query=parse_qs(urlsplit(self.path).query)
+                part=query.get('part',[''])[0]
+                body=jobs.comparison_file(query.get('job',[''])[0],part)
+                self.send_response(200)
+                self.send_header('Content-Type','application/zip' if part=='zip' else 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                self.send_header('Cache-Control','no-store')
+                self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body)
+            except Exception as error:self.reply({'error':str(error)},400)
+            return
         if path=='/api/state':
             try:
                 store,jobs=services()
@@ -104,6 +119,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if not isinstance(revision,str) or not revision:raise ValueError('Falta identificar el lote actual.')
                 result={'job':jobs.start(data['id'],precheck=True,reset_batch=revision)}
             elif path=='/api/jobs':result={'id':jobs.start(data['id'],bool(data.get('save')),bool(data.get('precheck')))}
+            elif path=='/api/comparison':result={'id':jobs.start_comparison(data['id'],data.get('revision'))}
             elif path=='/api/jobs/cancel':jobs.cancel(data['id'])
             elif path=='/api/chrome':
                 store.company()

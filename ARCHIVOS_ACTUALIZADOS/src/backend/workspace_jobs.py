@@ -3,12 +3,14 @@ import json
 import threading
 import uuid
 from workspace_store import batch_revision, now
+from comparison_jobs import ComparisonJobs
 
 
-class Jobs:
-    def __init__(self, store, runner=None):
+class Jobs(ComparisonJobs):
+    def __init__(self, store, runner=None, exporter=None):
         self.store = store
         self.runner = runner or self.real_runner
+        self.exporter = exporter
         self.lock = threading.Lock()
         self.events = {}
 
@@ -35,13 +37,13 @@ class Jobs:
         with self.lock, self.store.connect() as db:
             existing = db.execute('SELECT * FROM jobs WHERE id=?', (request_id,)).fetchone()
             if existing:
-                if existing['company'] != company:
+                if existing['company'] != company or json.loads(existing['data']).get('kind') == 'comparison':
                     raise ValueError('Operación de otra empresa.')
                 return request_id
             active = db.execute("SELECT id,data FROM jobs WHERE company=? AND status IN ('queued','running','cancelling')", (company,)).fetchone()
             if active:
                 running=json.loads(active['data'])
-                if reset_batch is not None or bool(running.get('save'))!=bool(save) or bool(running.get('precheck'))!=bool(precheck):
+                if running.get('kind') == 'comparison' or reset_batch is not None or bool(running.get('save'))!=bool(save) or bool(running.get('precheck'))!=bool(precheck):
                     raise ValueError('Hay otro trabajo en curso. Espera a que termine; la nueva carga todavia no se inicio.')
                 return active['id']
             batch = self.store.reset_review(reset_batch) if reset_batch is not None else self.store.settings().get('batch',{})

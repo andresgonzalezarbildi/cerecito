@@ -18,6 +18,52 @@ from xml_source import (read_zip_documents, read_xml_documents, preview_net_line
 FINESA_RUT = '216450470015'
 
 
+def grouped_destinations(source, decision, catalog, rules, legacy, sector_mapping, excluded=()):
+    """Reutilizar destinos identificados; las elecciones incompatibles no se pisan."""
+    available={(c['kind'],c['code']):c for c in catalog if c['kind'] in {'article','concept'}}
+    kind=decision.get('destinationKind')
+    choices={}
+    for index,raw in enumerate(source['lineas']):
+        if index in excluded:continue
+        explicit=decision.get('lines',{}).get(str(index),{})
+        if explicit.get('ignore') or explicit.get('sector_unmapped'):
+            continue
+        key=(source['rut'],raw['descripcion'].casefold().strip(),raw['indicadorIVA'])
+        historical=legacy.get(key,{})
+        rule=(sector_mapping.get(raw['indicadorIVA']) if source['rut']==FINESA_RUT else
+              rules.get(key) or (historical if float(historical.get('confidence',0))>=.95 else None))
+        choice=explicit if explicit.get('code') else rule
+        if not choice:
+            text=raw['descripcion'].casefold().strip()
+            exact=[c for c in available.values() if (not kind or c['kind']==kind)
+                   and text in [c['name'].casefold().strip(),*[str(s).casefold().strip() for s in c.get('synonyms',[])]]]
+            if len(exact)==1:choice={'kind':exact[0]['kind'],'code':exact[0]['code']}
+        if choice and (choice.get('kind'),choice.get('code')) in available and (not kind or choice.get('kind')==kind):
+            choices[index]=dict(choice)
+    for vat in {'1','2','3','11','12'}:
+        origins=[i for i,line in enumerate(source['lineas']) if i not in excluded and line['indicadorIVA']==vat
+                 and not decision.get('lines',{}).get(str(i),{}).get('ignore')]
+        known={(choices[i]['kind'],choices[i]['code']) for i in origins if i in choices}
+        if not known:
+            def family(name):
+                return re.sub(r'\b(?:exent[oa]s?|iva|en|suspenso|10|22)\b|[%()\-]', '', name.casefold()).strip()
+            families={(c['kind'],family(available[(c['kind'],c['code'])]['name'])) for c in choices.values()}
+            expected='1' if vat in {'11','12'} else vat
+            relatives=[c for c in available.values() if (c['kind'],family(c['name'])) in families
+                       and expected in (c.get('vat',[]) if isinstance(c.get('vat',[]),list) else str(c.get('vat','')).split('|'))]
+            if len(relatives)==1:known={(relatives[0]['kind'],relatives[0]['code'])}
+        if not known and source['rut']!=FINESA_RUT:
+            known={(r.get('kind'),r.get('code')) for (supplier,description,rate),r in rules.items()
+                   if supplier==source['rut'] and rate==vat and (r.get('kind'),r.get('code')) in available
+                   and (not kind or r.get('kind')==kind)}
+        if len(known)!=1:continue
+        selected_kind,code=next(iter(known))
+        for index in origins:
+            if not decision.get('lines',{}).get(str(index),{}).get('sector_unmapped'):
+                choices.setdefault(index,{'kind':selected_kind,'code':code})
+    return choices
+
+
 def finesa_sector(address):
     address = ' '.join(address.casefold().split())
     if re.match(r'^lavadero\b', address):
@@ -311,11 +357,13 @@ class Store:
                 raise ValueError('Comprobante inexistente.')
             if db.execute("SELECT 1 FROM jobs WHERE company=? AND status IN ('queued','running','cancelling')", (company,)).fetchone():
                 raise ValueError('Esperá a que termine el trabajo antes de cambiar decisiones.')
-            allowed = {'mode', 'supplier', 'center', 'payment', 'lines', 'skip', 'reviewed', 'destinationKind', 'skipSupplier', 'groupByVat', 'roundingDestination'}
+            allowed = {'mode', 'supplier', 'center', 'payment', 'lines', 'skip', 'reviewed', 'destinationKind', 'skipSupplier', 'groupByVat', 'roundingDestination', 'roundingMode'}
             if set(patch) - allowed:
                 raise ValueError('Campo de decisión desconocido.')
             if 'groupByVat' in patch and type(patch['groupByVat']) is not bool:
                 raise ValueError('Opción de agrupar por IVA inválida.')
+            if 'roundingMode' in patch and patch['roundingMode'] not in {'ignore','load'}:
+                raise ValueError('Elegí ignorar o cargar el redondeo.')
             if 'roundingDestination' in patch:
                 target=patch['roundingDestination']
                 if target is not None and (not isinstance(target,dict) or not any(
@@ -367,6 +415,20 @@ class Store:
                 patch=dict(patch,lines=choices)
             if patch:patch=dict(patch,reviewed=patch.get('reviewed',False))
             learned=[]
+            if not learn_lines and patch.get('groupByVat') is True and source['rut']!=FINESA_RUT:
+                for index,choice in patch.get('lines',{}).items():
+                    if choice.get('ignore') or not choice.get('code'):continue
+                    if not str(index).isdigit() or int(index)>=len(source['lineas']):
+                        raise ValueError('Línea inexistente.')
+                    raw=source['lineas'][int(index)]
+                    target=next((c for c in self.catalog() if c['kind']==choice.get('kind') and c['code']==choice['code']),None)
+                    if not target or target['kind'] not in {'article','concept'}:
+                        raise ValueError('Destino ausente del catálogo.')
+                    if raw['indicadorIVA'] in {'1','2','3','11','12'}:
+                        rate=choice.get('ivaZeta','1' if raw['indicadorIVA'] in {'11','12'} else raw['indicadorIVA'])
+                        try:validate_zeta_vat_choice(raw['indicadorIVA'],rate)
+                        except ValueError:continue  # Mostrar el error fiscal, sin aprenderlo.
+                        learned.append((company,source['rut'],raw['descripcion'].casefold().strip(),raw['indicadorIVA'],json.dumps({'kind':target['kind'],'code':target['code']})))
             if learn_lines:
                 source=json.loads(row['source'])
                 catalog=self.catalog()
@@ -562,16 +624,23 @@ class Store:
             non_monetary=set(non_monetary_line_indices(source))-included_zeros
             excluded=manual_ignored | auto_ignored | non_monetary
             tolerance=Decimal(settings['company'].get('tolerance','1'))
-            auto_rounding_indices=set(rounding_line_indices(source,tolerance))-manual_ignored
+            included_rounding={index for index in rounding_line_indices(source,tolerance)
+                               if decision.get('lines',{}).get(str(index),{}).get('ignore') is False}
+            auto_rounding_indices=set(rounding_line_indices(source,tolerance))-manual_ignored-included_rounding
             has_negative=any(Decimal(raw['monto'])<0 for index,raw in enumerate(source['lineas'])
                              if index not in excluded and index not in auto_rounding_indices)
             has_perceived=any(raw['indicadorIVA']=='11' for index,raw in enumerate(source['lineas']) if index not in excluded)
-            grouped=decision.get('groupByVat',has_negative or has_perceived) is True
+            needs_group=has_negative or has_perceived or bool(auto_rounding_indices) or any(
+                raw['indicadorIVA']=='12' or Decimal(raw['cantidad'])<=0
+                for index,raw in enumerate(source['lineas']) if index not in excluded)
+            grouped=decision.get('groupByVat',needs_group) is True
+            group_choices=grouped_destinations(source,decision,catalog,rules_for_invoice,legacy_for_invoice,sector_mapping,excluded|auto_rounding_indices) if grouped else {}
             supported={'1','2','3','6','7'}
             if grouped:supported.update({'11','12'})
             special_indicators={raw['indicadorIVA'] for index,raw in enumerate(source['lineas'])
                                 if index not in excluded and raw['indicadorIVA'] not in supported}
-            rounding_adjustment=payable_rounding(source,auto_rounding_indices,tolerance) if grouped else None
+            rounding_adjustment=payable_rounding(source,set(rounding_line_indices(source,tolerance)),tolerance) if grouped else None
+            rounding_mode=decision.get('roundingMode','load' if decision.get('roundingDestination') else 'ignore')
             for index, raw in enumerate(source['lineas']):
                 if index in manual_ignored:
                     proposals.append({'index':index,'options':[],'rule':None,
@@ -607,7 +676,12 @@ class Store:
                     confidence = 1 if rule_key in rules_for_invoice else float((historic or {}).get('confidence', .5))
                     proposals.append({'index': index, 'options': candidates[:8], 'rule': rule, 'reason': 'Regla confirmada para proveedor, descripción e IVA' if rule_key in rules_for_invoice else ('Sugerencia del histórico; revisar antes de confirmar' if historic else 'Coincidencia de descripción; requiere elección'), 'confidence': confidence})
                 if rule and decision.get('destinationKind') and rule.get('kind')!=decision['destinationKind']:rule=None
+                inferred=group_choices.get(index)
+                if inferred and (not choice or not choice.get('code')):
+                    rule=inferred
+                    proposals[-1].update(rule=inferred,reason='Destino identificado para este grupo de IVA',confidence=1)
                 chosen = choice or rule
+                if choice and set(choice)=={'ignore'} and choice['ignore'] is False:chosen=rule
                 if chosen and chosen.get('ignore'):
                     if raw['indicadorIVA'] not in {'6', '7'}:
                         reasons.append('No se puede ignorar un producto gravado o exento.')
@@ -628,7 +702,7 @@ class Store:
                     line['ivaZeta']=chosen['ivaZeta']
                     try:validate_zeta_vat_choice(vat,line['ivaZeta'])
                     except ValueError as error:reason=str(error)
-                elif grouped and vat in {'1','2','3','11','12'}:
+                elif vat in {'1','2','3','11','12'}:
                     line['ivaZeta']='1' if vat in {'11','12'} else vat
                 elif vat not in allowed_vat:
                     reason=('Elegí el IVA en Zeta para el grupo '+VAT_LABELS.get(vat,vat)+'.' if grouped
@@ -653,8 +727,14 @@ class Store:
             if generic_override:payload['proveedor']['generico']=True
             if manual_supplier:payload['proveedor']['seleccionManual']=True
             if grouped:payload['agruparPorIVA']=True
-            if rounding_adjustment and decision.get('roundingDestination'):
-                choice=decision['roundingDestination']
+            rounding_destination=decision.get('roundingDestination')
+            if rounding_adjustment and not rounding_destination and len(kinds)==1:
+                candidates=[c for c in catalog if c['kind'] in kinds and re.search(r'\bredondeo\b',c['name'],re.I)]
+                if len(candidates)==1:rounding_destination={'kind':candidates[0]['kind'],'code':candidates[0]['code']}
+            if rounding_adjustment and rounding_mode=='load':
+                payload['cargarRedondeo']=True
+            if rounding_adjustment and rounding_mode=='load' and rounding_destination:
+                choice=rounding_destination
                 target=next((c for c in catalog if c['kind']==choice['kind'] and c['code']==choice['code']),None)
                 if target:
                     payload['destinoRedondeo']={'codigoZeta':target['code'],'descripcionZeta':target['name'],'tipoDestino':target['kind']}
@@ -726,7 +806,7 @@ class Store:
                 state, reasons = 'skipped', []
             can_precheck=state not in {'skipped','non_invoice','loaded'} and (
                 state!='manual' or (source['tipo'] in {'111','112'} and provider is not None))
-            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'can_precheck':can_precheck, 'reasons': reasons, 'supplier_confirmation_required':supplier_confirmation_required, 'supplier_confirmation_proof':supplier_proof if supplier_confirmation_required else None, 'finesa':is_finesa, 'suggested_center':center if 'center' not in decision else '', 'auto_ignored_lines':sorted(auto_ignored), 'auto_collection':auto_collection, 'auto_rounding_lines':sorted(auto_rounding_indices),'rounding_adjustment':rounding_adjustment, 'non_monetary_lines':sorted(non_monetary), 'tax_groups':tax_breakdown(source,excluded),'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
+            result.append({'key': record['key'], 'source': source, 'decision': decision, 'proposals': proposals, 'mode': mode, 'modeLocked':mode_locked, 'modePending':mode_pending, 'paymentCode':payment['code'] if mode=='cash' and payment else '', 'paymentDefault':mode=='cash' and not decision.get('payment'), 'form': form, 'state': state, 'can_precheck':can_precheck, 'reasons': reasons, 'supplier_confirmation_required':supplier_confirmation_required, 'supplier_confirmation_proof':supplier_proof if supplier_confirmation_required else None, 'finesa':is_finesa, 'suggested_center':center if 'center' not in decision else '', 'auto_ignored_lines':sorted(auto_ignored), 'auto_collection':auto_collection, 'auto_rounding_lines':sorted(auto_rounding_indices),'rounding_adjustment':rounding_adjustment,'rounding_mode':rounding_mode,'rounding_destination':rounding_destination, 'non_monetary_lines':sorted(non_monetary), 'tax_groups':tax_breakdown(source,excluded|auto_rounding_indices),'payload': payload, 'plan': plan,'duplicate_state':duplicate_state,'last_result':last})
             with self.connect() as db:
                 for proposal in proposals:
                     db.execute('INSERT OR REPLACE INTO proposals VALUES(?,?,?,?)',(company,record['key'],proposal['index'],json.dumps(dict(proposal,generated=now()))))
