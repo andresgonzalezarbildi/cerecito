@@ -184,7 +184,7 @@ function addTaxGrouping(invoice,before){
   panel.className='tax-grouping';
   const grouped=invoice.payload.agruparPorIVA===true;
   const manual=invoice.state==='manual';
-  panel.innerHTML=`<button type="button" id="toggleTaxGrouping" aria-pressed="${grouped}">${grouped?'Quitar agrupación por IVA':'Agrupar por IVA'}</button>`;
+  panel.innerHTML=`<button type="button" id="toggleTaxGrouping" aria-pressed="${grouped}">${grouped?'Cargar por línea':'Agrupar por IVA'}</button>`;
   before.before(panel);
   $('toggleTaxGrouping').onclick=()=>decide(invoice.key,{groupByVat:!grouped});
   if(!grouped)return;

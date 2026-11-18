@@ -404,7 +404,8 @@ class WorkflowTests(unittest.TestCase):
         invoice=self.choose()
         self.assertEqual(invoice['plan']['lineas'][0]['ivaEsperado'],'0.00')
         self.assertEqual(invoice['plan']['lineas'][0]['montoXML'],'100')
-        self.assertEqual(invoice['plan']['lineas'][0]['descripcionXML'],invoice['source']['lineas'][0]['descripcion'])
+        self.assertEqual(invoice['plan']['lineas'][0]['origenes'],[0])
+        self.assertEqual(invoice['source']['lineas'][0]['descripcion'],'Producto sintético')
 
     def test_rounding_tolerance_is_per_document(self):
         for difference,expected in [('0.01','ready'),('1.00','ready'),('1.01','needs_review')]:
@@ -438,6 +439,34 @@ class WorkflowTests(unittest.TestCase):
                 if indicator=='12':
                     self.assertEqual(self.store.invoices()[0]['state'],'ready')
                 else:self.assertNotEqual(self.store.invoices()[0]['state'],'ready')
+
+    def test_every_invoice_defaults_to_three_tax_groups_and_can_switch_to_lines(self):
+        from cargar_lote import allow_rounding, plan_for
+        self.store.import_catalog([
+            {'kind':'article','code':'A10','name':'Producto sintético 10%','vat':'2'},
+            {'kind':'article','code':'A22','name':'Producto sintético 22%','vat':'3'}])
+        extra=''.join(f'<Item><NroLinDet>{index+1}</NroLinDet><NomItem>Compra {index}</NomItem><IndFact>{index%3+1}</IndFact><MontoItem>10</MontoItem><Cantidad>1</Cantidad></Item>' for index in range(1,30))
+        raw=xml(1800,'422',extra=extra).replace(b'<FmaPago>1</FmaPago>',b'<FmaPago>2</FmaPago>').replace(b'<MntNoGrv>100</MntNoGrv>',
+            b'<MntNoGrv>190</MntNoGrv><MntNetoIvaTasaMin>100</MntNetoIvaTasaMin><MntIVATasaMin>10</MntIVATasaMin><MntNetoIVATasaBasica>100</MntNetoIVATasaBasica><MntIVATasaBasica>22</MntIVATasaBasica>')
+        self.store.import_documents('many.xml',raw)
+        invoice=self.store.invoices()[0]
+        self.assertEqual(invoice['decision'],{})  # Agrupada sin tocar opciones.
+        self.assertEqual(invoice['state'],'ready',invoice['reasons'])
+        self.assertTrue(invoice['payload']['agruparPorIVA'])
+        self.assertEqual(len(invoice['source']['lineas']),30)
+        self.assertEqual(len(invoice['plan']['lineas']),3)
+        self.assertEqual([line['totalEsperado'] for line in allow_rounding(invoice['plan'])['lineas']],['190.00','110.00','122.00'])
+        with patch('cargar_lote.company_rut',return_value=COMPANY):
+            _,engine_plan,_=plan_for(invoice['payload'],invoice['source'])
+        self.assertEqual(len(engine_plan['lineas']),3)
+        choices={str(index):{'kind':'article','code':('A1','A10','A22')[index%3]} for index in range(30)}
+        self.store.decide(invoice['key'],{'groupByVat':False,'lines':choices})
+        per_line=Store(self.directory).invoices()[0]
+        self.assertEqual(per_line['state'],'ready',per_line['reasons'])
+        self.assertNotIn('agruparPorIVA',per_line['payload'])
+        self.assertEqual(len(per_line['plan']['lineas']),30)
+        self.store.decide(invoice['key'],{'groupByVat':True})
+        self.assertEqual(len(self.store.invoices()[0]['plan']['lineas']),3)
 
     def test_group_plan_preserves_origins_and_totals_by_vat(self):
         from cargar_lote import allow_rounding
@@ -516,7 +545,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertIs(invoice['decision']['lines']['1']['ignore'],False)
         self.assertEqual(invoice['state'],'ready')
         self.assertEqual(invoice['plan']['lineasIgnoradas'],[])
-        self.assertEqual(invoice['plan']['lineas'][1]['totalEsperado'],'0.00')
+        self.assertEqual(len(invoice['plan']['lineas']),1)
+        self.assertEqual(invoice['plan']['lineas'][0]['origenes'],[0,1])
+        self.assertEqual(invoice['plan']['lineas'][0]['totalEsperado'],'100.00')
         self.store.decide(key,{'lines':{'1':{'ignore':True}}})
         self.assertEqual(self.store.invoices()[0]['plan']['lineasIgnoradas'],[1])
 
@@ -608,7 +639,7 @@ class WorkflowTests(unittest.TestCase):
             b'<MntNetoIVATasaBasica>100</MntNetoIVATasaBasica><MntIVATasaBasica>22</MntIVATasaBasica>')
         self.store.import_documents('vat.xml',raw)
         key=self.store.invoices()[0]['key']
-        self.store.decide(key,{'mode':'credit','lines':{'0':{'kind':'concept','code':'G1'}}})
+        self.store.decide(key,{'mode':'credit','groupByVat':False,'lines':{'0':{'kind':'concept','code':'G1'}}})
         invoice=self.store.invoices()[0]
         self.assertEqual(invoice['state'],'ready')
         self.assertEqual(invoice['payload']['lineas'][0]['ivaZeta'],'3')
@@ -800,7 +831,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.invoices()[0]['payload']['zeta']['centroCosto'],'C1')
         self.assertEqual(self.store.invoices()[0]['state'],'ready')
 
-    def test_name_match_is_only_a_proposal(self):
+    def test_name_match_is_only_a_proposal_in_per_line_mode(self):
+        self.store.decide(self.key,{'groupByVat':False})
         invoice=self.store.invoices()[0]
         self.assertEqual(invoice['state'],'needs_review')
         self.assertEqual(invoice['proposals'][0]['confidence'],.5)
@@ -816,11 +848,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(invoice['payload']['lineas'][0]['codigoZeta'],'G1')
         self.assertEqual(invoice['decision'].get('lines',{}),{})
         restarted.import_documents('different.xml',xml(69).replace(SUPPLIER.encode(),b'000000000003'))
+        restarted.decide(restarted.invoices()[0]['key'],{'groupByVat':False})
         self.assertIsNone(restarted.invoices()[0]['proposals'][0]['rule'])
         restarted.import_documents('different-vat.xml',xml(70,indicator='3'))
+        restarted.decide(restarted.invoices()[0]['key'],{'groupByVat':False})
         self.assertIsNone(restarted.invoices()[0]['proposals'][0]['rule'])
 
     def test_invalid_manual_destination_is_not_learned_or_saved(self):
+        self.store.decide(self.key,{'groupByVat':False})
         with self.assertRaises(ValueError):
             self.store.decide(self.key,{'lines':{'0':{'kind':'article','code':'MISSING'}}},learn_lines=True)
         self.assertEqual(self.store.invoices()[0]['decision'].get('lines',{}),{})
@@ -956,6 +991,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.store.invoices()[0]['mode'],'credit')
 
     def test_precheck_runs_before_line_decisions_and_hides_existing(self):
+        self.store.decide(self.key,{'groupByVat':False})
         def runner(payload,save,progress,cancelled):
             self.assertFalse(save)
             self.assertTrue(payload['duplicates_only'])

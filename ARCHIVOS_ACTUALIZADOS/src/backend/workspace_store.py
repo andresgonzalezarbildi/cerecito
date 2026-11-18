@@ -627,13 +627,7 @@ class Store:
             included_rounding={index for index in rounding_line_indices(source,tolerance)
                                if decision.get('lines',{}).get(str(index),{}).get('ignore') is False}
             auto_rounding_indices=set(rounding_line_indices(source,tolerance))-manual_ignored-included_rounding
-            has_negative=any(Decimal(raw['monto'])<0 for index,raw in enumerate(source['lineas'])
-                             if index not in excluded and index not in auto_rounding_indices)
-            has_perceived=any(raw['indicadorIVA']=='11' for index,raw in enumerate(source['lineas']) if index not in excluded)
-            needs_group=has_negative or has_perceived or bool(auto_rounding_indices) or any(
-                raw['indicadorIVA']=='12' or Decimal(raw['cantidad'])<=0
-                for index,raw in enumerate(source['lineas']) if index not in excluded)
-            grouped=decision.get('groupByVat',needs_group) is True
+            grouped=decision.get('groupByVat',True) is True
             group_choices=grouped_destinations(source,decision,catalog,rules_for_invoice,legacy_for_invoice,sector_mapping,excluded|auto_rounding_indices) if grouped else {}
             supported={'1','2','3','6','7'}
             if grouped:supported.update({'11','12'})

@@ -1,4 +1,4 @@
-﻿CERECITO | ACTUALIZACION DEL 17/11/2026
+﻿CERECITO | ACTUALIZACION DEL 18/11/2026
 
 Instalación
 1. Cerrá Cerecito.
@@ -70,10 +70,13 @@ Las líneas de importe cero vienen ignoradas y tienen Volver a incluir.
 La decisión se aplica también a los comprobantes del lote ya importado.
 
 Agrupación por IVA y descuentos
-La agrupación se propone desde el inicio cuando hay descuentos negativos,
-cantidades no positivas, redondeos, IVA en suspenso o impuesto percibido.
-Si ya habías elegido quitar la agrupación para una factura, esa elección se
-conserva. Podés volver a activarla desde Agrupar por IVA.
+Todas las facturas comienzan agrupadas por IVA, sin activar opciones.
+Con IVA común se carga un máximo de tres líneas: exento, 10% y 22%.
+Los impuestos especiales y los redondeos que elijas cargar conservan su grupo.
+El botón Cargar por línea permite volver al detalle original. Agrupar por IVA
+permite volver a la carga resumida. Si ya habías elegido el modo por línea
+para una factura, se respeta esa decisión. El cambio de defecto se aplica
+también al lote actual sin volver a importar ni borrar las elecciones.
 
 Se proponen los destinos de las reglas confirmadas, del sector, de las líneas
 ya elegidas y de coincidencias exactas sin ambigüedad. Un descuento sin destino
